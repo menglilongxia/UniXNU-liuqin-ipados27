@@ -387,6 +387,7 @@ extern "C" __attribute__((weak)) volatile uint32_t native_ufs_dpu_state = 0;
 extern "C" __attribute__((weak)) int native_gpu_trace_enabled(void) {return 0;}
 extern "C" __attribute__((weak)) void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
 extern "C" __attribute__((weak)) uint32_t native_gpu_trace_snapshot(void *, uint32_t) {return 0;}
+extern "C" __attribute__((weak)) int boot_kthread_report_nth(const char *, unsigned, char *, unsigned, char *, unsigned) {return -1;}
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 # The keystore state service (AppleKeyStoreState) and its probe, unchanged from iPadOS 17.

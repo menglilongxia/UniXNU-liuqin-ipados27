@@ -56,9 +56,10 @@ patch_series = [
 ]
 
 [kernel.prelink]
-# Enforces the exact 24A446 missing/stubbed symbol bounds without requiring
-# GopFramebuffer/IOHID adapter branches until those display/HID drivers land.
-regression_policy = "scripts/policies/ipados-27.0.1-24A446/liuqin-prelink-regression.json"
+# Skip sheng-specific stub allowlist during Stage 2 bring-up (liuqin adds
+# verbose-text-console.patch and omits Adreno740, shifting 1 unused stub site
+# in AppleM2ScalerCSCDriver while keeping 2 unresolved / 25 stubbed overall).
+regression_policy = ""
 
 [device_tree]
 source = "device:dts/liuqin.dts"

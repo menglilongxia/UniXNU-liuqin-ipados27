@@ -1,0 +1,5 @@
+# Board-specific XNU 12377 patches (applied after arch, soc, and os series).
+# SoC-wide SM8475 patches (SMP Affinity1, Gunyah physical timer) live in UniXNU-sm8475-common.
+linux-clang-ptrauth-auth-null.patch
+stack-shift.patch
+verbose-text-console.patch

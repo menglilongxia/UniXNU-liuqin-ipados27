@@ -1,0 +1,4 @@
+[[source]]
+name = "sm8475"
+kind = "soc"
+local = "../UniXNU-sm8475-common"

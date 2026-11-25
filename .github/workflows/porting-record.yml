@@ -1,0 +1,22 @@
+name: Porting record
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: UniXNU
+      - name: Validate porting.toml
+        run: python3 UniXNU/scripts/porting-record.py check --device device

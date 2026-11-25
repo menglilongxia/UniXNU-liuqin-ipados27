@@ -1,0 +1,13 @@
+schema_version = 2
+
+[soc]
+name = "sm8475"
+description = "Qualcomm SM8475 (Snapdragon 8+ Gen 1, cape / taro)"
+source_repository = "https://github.com/torvalds/linux"
+source_revision = "f1586048fb1dabb91c82fbe11557e505587973d3"
+
+[components]
+# Architectural providers shared across all SM8475 boards (arm64 and arm64e).
+# GPU nodes remain disabled until an Adreno 730 provider is implemented; do not
+# bind the SM8550 Adreno740 component to Adreno 730 register layouts.
+include = ["ArmCpu", "ArmDTPlatform"]

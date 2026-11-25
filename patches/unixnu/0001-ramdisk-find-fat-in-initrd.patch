@@ -1,0 +1,97 @@
+diff --git a/package/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c b/package/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c
+index 9541009..43135f9 100644
+--- a/package/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c
++++ b/package/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c
+@@ -208,6 +208,73 @@ STATIC EFI_BLOCK_IO_PROTOCOL  mBlockIo = {
+   RamBlockFlush
+ };
+ 
++// Android boot image v4 prepends vendor_boot's vendor_ramdisk (LZ4/gzip CPIO,
++// not necessarily 512-byte aligned) ahead of boot.img's ramdisk in the FDT
++// initrd range. Scan for a packed UNXNFAT1 header or a FAT12/16/32 boot sector
++// when offset 0 does not already start with the payload.
++#define PAYLOAD_SCAN_LIMIT  (256ULL * 1024 * 1024)
++
++STATIC
++BOOLEAN
++IsFatBootSector (
++  IN CONST UINT8  *Sector
++  )
++{
++  if ((Sector[510] != 0x55) || (Sector[511] != 0xAA)) {
++    return FALSE;
++  }
++  if ((Sector[0] != 0xEB) && (Sector[0] != 0xE9)) {
++    return FALSE;
++  }
++  return (CompareMem ((VOID *)(Sector + 82), "FAT32   ", 8) == 0) ||
++         (CompareMem ((VOID *)(Sector + 54), "FAT16   ", 8) == 0) ||
++         (CompareMem ((VOID *)(Sector + 54), "FAT12   ", 8) == 0);
++}
++
++STATIC
++UINT64
++FindPayloadInInitrd (
++  IN CONST UINT8  *Base,
++  IN UINT64        Size
++  )
++{
++  UINT64  Limit;
++  UINT64  Index;
++
++  if ((Size >= PACKED_HEADER_SIZE) && (CompareMem ((VOID *)Base, "UNXNFAT1", 8) == 0)) {
++    return 0;
++  }
++  if ((Size >= RAM_BLOCK_SIZE) && IsFatBootSector (Base)) {
++    return 0;
++  }
++
++  Limit = (Size < PAYLOAD_SCAN_LIMIT) ? Size : PAYLOAD_SCAN_LIMIT;
++  for (Index = 0; (Index + 8) <= Limit; ++Index) {
++    UINT8  Ch = Base[Index];
++    if ((Ch == 'U') && ((Index + PACKED_HEADER_SIZE) <= Size) &&
++        (CompareMem ((VOID *)(Base + Index), "UNXNFAT1", 8) == 0))
++    {
++      return Index;
++    }
++    if (Ch == 'F') {
++      if ((Index >= 82) && ((Index - 82 + RAM_BLOCK_SIZE) <= Size) &&
++          (CompareMem ((VOID *)(Base + Index), "FAT32   ", 8) == 0) &&
++          IsFatBootSector (Base + Index - 82))
++      {
++        return Index - 82;
++      }
++      if ((Index >= 54) && ((Index - 54 + RAM_BLOCK_SIZE) <= Size) &&
++          ((CompareMem ((VOID *)(Base + Index), "FAT16   ", 8) == 0) ||
++           (CompareMem ((VOID *)(Base + Index), "FAT12   ", 8) == 0)) &&
++          IsFatBootSector (Base + Index - 54))
++      {
++        return Index - 54;
++      }
++    }
++  }
++  return MAX_UINT64;
++}
++
+ STATIC
+ VOID
+ PublishInitrd (
+@@ -246,6 +313,18 @@ PublishInitrd (
+     return;
+   }
+ 
++  {
++    UINT64  PayloadOffset = FindPayloadInInitrd ((CONST UINT8 *)(UINTN)Start, End - Start);
++    if (PayloadOffset == MAX_UINT64) {
++      DEBUG ((DEBUG_ERROR, "UNIXNURAMDISK: no FAT/UNXNFAT1 payload in 0x%lx bytes (initrd 0x%lx)\n",
++              End - Start, Start));
++    } else if (PayloadOffset != 0) {
++      DEBUG ((DEBUG_ERROR, "UNIXNURAMDISK: payload found at +0x%lx (initrd 0x%lx)\n",
++              PayloadOffset, Start));
++      Start += PayloadOffset;
++    }
++  }
++
+   mRamBase = (UINT8 *)(UINTN)Start;
+   mSourceBytes = (UINTN)(End - Start);
+   mLogicalBytes = End - Start;

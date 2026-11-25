@@ -1,0 +1,3 @@
+# Local overrides (copy to local.toml; never commit local.toml).
+[sources.sm8475]
+local = "../UniXNU-sm8475-common"

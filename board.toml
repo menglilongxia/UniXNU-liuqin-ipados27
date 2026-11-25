@@ -1,0 +1,176 @@
+schema_version = 2
+
+[board]
+name = "liuqin"
+soc = "SM8475"
+soc_source = "sm8475"
+os_profile = "ipados-27.0.1-24A446"
+description = "Xiaomi Pad 6 Pro (liuqin, SM8475, 12GB/512GB)"
+# Maps device package/ to tree/kits/sheng as required by build-sheng-source-storage.py.
+kit = "sheng"
+
+[userdata]
+# Measured on this 12GB + 512GB Xiaomi Pad 6 Pro (liuqin) via fastboot getvar all (2026-11-24):
+#   logical-block-size = 0x1000 (4096 bytes)
+#   partition-size:userdata = 0x73D3DFB000 bytes (463.31 GiB = 0x73D3DFB 4 KiB sectors)
+# Standard liuqin LUN 0 GPT places userdata (sda35) at first_lba = 0x2A1600 (2758144):
+#   last_lba = 0x2A1600 + 0x73D3DFB - 1 = 0x76753FA (124212218)
+first_lba = 2758144
+last_lba = 124212218
+lba_bytes = 4096
+
+[components]
+# Official UniXNU Format 2 components matching UniXNU-sheng (iPadOS 27 arm64e),
+# omitting SM8550-specific Adreno740 until an Adreno 730 provider is implemented.
+include = [
+  "ArmDTPlatform",
+  "ArmCpu",
+  "XnuPrelink",
+  "DarwinBoot",
+  "ShengUfs",
+  "RamBlock",
+  "GopFramebuffer",
+  "AppleKeyStoreState",
+]
+
+[kernel]
+defconfig = "liuqin_ipados27_defconfig"
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "build-libpthread-kernel.py",
+  "component:ShengUfs",
+  "build-sheng-source-storage.py --policy-dir scripts/policies/ipados-27.0.1-24A446",
+  "component:RamBlock",
+  "component:AppleKeyStoreState",
+  "build-fileset-release-reference.py --tree . --lto",
+]
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
+patch_series = [
+  "arch:patches/xnu/series",
+  "soc:patches/xnu-12377/series",
+  "os:patches/xnu/series",
+  "device:patches/xnu-12377/series",
+]
+
+[kernel.prelink]
+# Enforces the exact 24A446 missing/stubbed symbol bounds without requiring
+# GopFramebuffer/IOHID adapter branches until those display/HID drivers land.
+regression_policy = "scripts/policies/ipados-27.0.1-24A446/liuqin-prelink-regression.json"
+
+[device_tree]
+source = "device:dts/liuqin.dts"
+include_dirs = ["soc:dts"]
+
+[firmware]
+# Uses official UniXNU/uefi-sheng (Mu-Silicium + WaipioPkg) with this repository's
+# firmware/ overlay (Platforms/Xiaomi/liuqinPkg and Resources/Configs/liuqin.toml).
+config = "liuqin"
+dsc = "Platforms/Xiaomi/liuqinPkg/liuqin.dsc"
+fd = "Build/liuqinPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+preflight = ["scripts/prepare-uefi-overlay.py", "scripts/build-liuqin-dtb.py"]
+patches = ["Resources/MuPatches/Gic-Spurious.patch"]
+submodules = [
+  "Common/Mu",
+  "Common/Mu_OEM_Sample",
+  "Silicium-ACPI",
+  "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl",
+]
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/Xiaomi",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+  "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
+  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+]
+
+[firmware.defines]
+ENABLE_SECUREBOOT = "1"
+DEVICE_MODEL = "liuqin"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "liuqin-ipados27"
+
+[bootimg]
+dtb = "build/liuqin/liuqin.dtb"
+dtb_node = [
+  { path = "/reserved-memory/splash_region", props = [
+    { name = "label", type = "s", value = "cont_splash_region" },
+    { name = "reg", type = "x", value = ["0x0", "0xb8000000", "0x0", "0x2b00000"] },
+  ] },
+]
+
+[payload]
+volume = "LIUQINESP"
+size_mib = 176
+timeout = 5
+root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
+loader = "firmware"
+title = "iPadOS 27 (liuqin)"
+dram_size = "0x80000000"
+panic_screen = true
+kernel_args = [
+  "-v",
+  "vc-text=1",
+  "serial=3",
+  "debug=0x14e",
+  "kt_fixed_zones=120",
+  "-no_slto_panic",
+  "use_contiguous_hint=0",
+  "native-source-storage=1",
+  "native-ufs-root=1",
+  "amfi_get_out_of_my_way=1",
+  "disable-watchdogd=1",
+  "lite=1",
+]
+
+[payload.adt]
+# Matches Apple iPad17,3 (0x8142) from profiles/os/ipados-27.0.1-24A446/profile.toml.
+chip_id = "8142"
+# 2 GiB owned bootstrap window inside the high DRAM bank (>= 0x840000000), matching SM8450/cupid.
+owned_memory_size = "0x80000000"
+packed_data_ramdisk = true
+persistent_data = true
+unique_chip_id = "required"
+
+[adt.product.string]
+model = "J820AP"
+artwork-display-gamut = "sRGB"
+
+[adt.product.u32]
+thin-bezel = 1
+
+[adt.defaults.u32]
+sleep-disabled = 1
+# Qualcomm Gunyah runs at EL2; no Apple PMGR or SEP present.
+vmm-present = 1
+"kern.maxvnodes" = 66560
+
+[adt.chosen.u32]
+# SM8475 has no Apple CTRR hardware.
+kernel-ctrr-to-be-enabled = 0
+
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2
+
+[package]
+unixnu = "../UniXNU"
+
+[package.defconfig]
+"ipados-27.0.1-24A446" = "liuqin_ipados27_defconfig"

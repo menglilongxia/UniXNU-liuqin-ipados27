@@ -1,0 +1,5 @@
+[Defines]
+  DEC_SPECIFICATION              = 0x00010005
+  PACKAGE_NAME                   = liuqinPkg
+  PACKAGE_GUID                   = A23F8B10-9D4C-47A1-8B53-C1E42F9D8003
+  PACKAGE_VERSION                = 0.1

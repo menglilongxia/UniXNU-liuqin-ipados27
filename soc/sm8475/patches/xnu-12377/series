@@ -1,0 +1,7 @@
+# SM8475 SoC patches for xnu-12377 (iPadOS 27 / macOS 27, arm64e), applied in order.
+# 1. sheng-platform-power inserts the PMGR hook expected as context by shared OS patches.
+# 2. native-smp-secondary masks MPIDR Affinity0+Affinity1 (SM8475 numbers cores in Affinity1).
+# 3. timers-avoid-trapped-physical-timer avoids writing CNTP_CTL_EL0 under Qualcomm Gunyah.
+sheng-platform-power.patch
+native-smp-secondary.patch
+timers-avoid-trapped-physical-timer.patch

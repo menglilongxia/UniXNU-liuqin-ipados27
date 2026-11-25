@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+// Xiaomi Pad 6 Pro (liuqin), Qualcomm SM8475 (Snapdragon 8+ Gen 1, cape).
+//
+// Hardware identity verified via fastboot getvar all (2026-11-24) & stock firmware:
+//   - product: liuqin, socid: 531 (0x213), hw-revision: 10000
+//   - qcom,msm-id: Cape 0x213 (531), 0x21c (540), 0x212 (530) rev 0x10000 / 0x20000
+//   - qcom,board-id: <0x10008 0>, xiaomi,miboard-id: <0x10 0>
+//   - Panel: 1800x2880 dual-DSI DSC video mode LCD (CSOT m81_42_02_0b / Tianma m81_36_02_0a)
+//   - ABL cont_splash framebuffer: 0xb8000000 + 0x2b00000 (45 MiB)
+//   - ramoops: 0xa7000000 + 0x400000 (4 MiB)
+//   - UFS: 0x1d84000 (HC), 0x1d80000 (QMP v6 PHY), 512GB LUN0 userdata 0x2A1600..0x76753FA
+
+/dts-v1/;
+/include/ "sm8475.dtsi"
+
+/ {
+    model = "Xiaomi Pad 6 Pro";
+    compatible = "xiaomi,liuqin", "qcom,sm8475", "qcom,cape-mtp", "qcom,cape", "qcom,mtp";
+
+    // Qualcomm ABL matches the appended DTB in boot.img using these root IDs.
+    // Verified: fastboot getvar socid -> 531 (0x213); stock dtbo board-id 0x10008.
+    qcom,msm-id = <0x213 0x10000 0x213 0x20000 0x212 0x10000 0x212 0x20000 0x21c 0x10000 0x21c 0x20000>;
+    qcom,board-id = <0x10008 0x0>;
+    xiaomi,miboard-id = <0x10 0x0>;
+
+    chosen {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+    };
+
+    // Nominal handoff window matching sheng/cupid; DarwinBoot selects the
+    // owned window from the UEFI memory map (12 GiB high bank >= 0x840000000).
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x80000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        // Stock ABL continuous-splash framebuffer (1800x2880x4 = 20,736,000 B inside 45 MiB)
+        splash_region: framebuffer@b8000000 {
+            label = "cont_splash_region";
+            reg = <0x0 0xb8000000 0x0 0x2b00000>;
+            no-map;
+        };
+
+        // Stock ramoops persistent console/pmsg region
+        ramoops_region: ramoops@a7000000 {
+            reg = <0x0 0xa7000000 0x0 0x400000>;
+            no-map;
+        };
+
+        // Stock ADSP carveout (differs from pong 0x85700000)
+        adsp_region: adsp@9fd00000 {
+            reg = <0x0 0x9fd00000 0x0 0x3100000>;
+            no-map;
+        };
+    };
+};
+
+// SM8475 cluster mapping: 4x Cortex-A510 (E), 3x Cortex-A710 + 1x Cortex-X2 (P)
+&cpu0 { unixnu,cluster-type = "E"; };
+&cpu1 { unixnu,cluster-type = "E"; };
+&cpu2 { unixnu,cluster-type = "E"; };
+&cpu3 { unixnu,cluster-type = "E"; };
+&cpu4 { unixnu,cluster-type = "P"; };
+&cpu5 { unixnu,cluster-type = "P"; };
+&cpu6 { unixnu,cluster-type = "P"; };
+&cpu7 { unixnu,cluster-type = "P"; };
+
+&ufs { status = "okay"; };
+&ufsphy { status = "okay"; };

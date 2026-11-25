@@ -1,0 +1,23 @@
+# Stage 1/2: Xiaomi Pad 6 Pro (liuqin, SM8475) official iPadOS 27.0.1 (arm64e) bring-up.
+# Follows UniXNU-sheng's sheng_ipados27_defconfig without SM8550-only Adreno740.
+CONFIG_XNU_BUILD_ARCHIVES=y
+CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
+CONFIG_XNU_DT_PANIC_REGION=y
+CONFIG_XNU_ARMVIRT_PLATFORM=n
+CONFIG_XNU_KERNEL_CHAINED_FIXUPS=y
+
+# Storage & root bring-up via official ShengSourceStorage (contains ShengUfs + SourceStorage, aligned with sheng).
+# Do NOT also set CONFIG_XNU_NATIVE_UFS=y: libShengSourceStorage.a already bundles ShengUfs objects.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/sheng-source-storage/libShengSourceStorage.a"
+CONFIG_XNU_SOURCE_STORAGE_TABLES="userdata"
+CONFIG_XNU_SOURCE_STORAGE=y
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+
+# Software GOP framebuffer presentation until Adreno 730 + AdrenoMetal is ported.
+# CONFIG_XNU_NATIVE_ADRENO is not set

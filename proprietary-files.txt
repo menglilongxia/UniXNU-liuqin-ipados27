@@ -1,0 +1,25 @@
+# Proprietary firmware inputs for Xiaomi Pad 6 Pro (liuqin, SM8475).
+# Stage 1 UEFI (LIUQIN_VENDOR_HW=0) requires NO proprietary vendor binaries:
+# Mu-Silicium + SimpleFbDxe runs directly on ABL's live framebuffer.
+#
+# Planned for Stage 3+ (extract from your own device's stock HyperOS fastboot ROM;
+# never commit proprietary binaries to this repository):
+#
+# Touch (Novatek NT36532, select matching panel vendor):
+#   vendor/firmware/novatek_nt36532_m81_fw_csot.bin
+#   vendor/firmware/novatek_nt36532_m81_fw_tm.bin
+#
+# GPU (Adreno 730):
+#   vendor/firmware/a730_sqe.fw
+#   vendor/firmware/gmu_gen70000.bin
+#   vendor/firmware/a730_zap.mdt
+#   vendor/firmware/a730_zap.b00..b02
+#
+# Wi-Fi (QCA6490):
+#   vendor/firmware/qca6490/amss.bin
+#   vendor/firmware/qca6490/m3.bin
+#   vendor/firmware/qca6490/bd_m81gf.elf
+#
+# ADSP (battery/audio):
+#   vendor/firmware_mnt/image/adsp.mdt
+#   vendor/firmware_mnt/image/adsp.b00..b25

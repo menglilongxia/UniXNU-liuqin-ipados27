@@ -1,0 +1,255 @@
+name: macOS iPadOS 27 Build (liuqin)
+
+# Builds the official arm64e iPadOS 27.0.1 (24A446) MH_FILESET prelinked XNU
+# kernel (Apple Clang + LTO), UniXNU EFI package, liuqinPkg UEFI firmware
+# (with v4 vendor_ramdisk FAT scanner), payload, and boot.img on macos-26.
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Build scope: full (kernel + firmware + payload + boot.img) or kernel"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full
+          - kernel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liuqin-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      UNIXNU_DEVICE: ${{ github.workspace }}/device
+      UNIXNU_UEFI: ${{ github.workspace }}/uefi-sheng
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Select newest Xcode 26 SDK
+        run: |
+          XCODE_DIR=$(ls -d /Applications/Xcode_26*.app/Contents/Developer /Applications/Xcode.app/Contents/Developer 2>/dev/null | sort -V | tail -1)
+          echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          echo "Using DEVELOPER_DIR=$XCODE_DIR"
+
+      - name: Check out UniXNU-liuqin (device repo)
+        uses: actions/checkout@v4
+        with:
+          path: device
+          persist-credentials: false
+
+      - name: Stage vendored SM8475 SoC repository
+        run: |
+          rm -rf UniXNU-sm8475-common
+          cp -R device/soc/sm8475 UniXNU-sm8475-common
+          ls -la UniXNU-sm8475-common
+
+      - name: Check out UniXNU/UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 8542980d02b4d2cc5c32ee3542de1760b2562aac
+          submodules: recursive
+          path: UniXNU
+          persist-credentials: false
+
+      - name: Apply device-side UniXNU patches (v4 initrd FAT scanner & nm fix)
+        working-directory: UniXNU
+        run: |
+          shopt -s nullglob
+          for patch in ../device/patches/unixnu/*.patch; do
+            echo "Applying $(basename "$patch")"
+            git apply "$patch"
+          done
+
+      - name: Check out UniXNU/uefi-sheng
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-sheng
+          persist-credentials: false
+
+      - name: Initialize uefi-sheng submodules (excluding Binaries)
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: uefi-sheng
+        run: |
+          git submodule update --init --depth 1 \
+            Common/Mu Common/Mu_OEM_Sample Mu_Basecore Silicium-ACPI \
+            Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl
+
+      - name: Install liuqinPkg firmware overlay
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        run: |
+          UNIXNU_UEFI="$GITHUB_WORKSPACE/uefi-sheng" \
+          UNIXNU_DEVICE="$GITHUB_WORKSPACE/device" \
+          python3 device/scripts/prepare-uefi-overlay.py
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install host tools
+        run: |
+          brew install llvm lld mtools dtc nasm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          if ! command -v unifdef >/dev/null; then
+            brew install unifdef
+            echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Report toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          python3 --version
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Resolve configuration and fetch sources
+        id: status
+        working-directory: UniXNU
+        run: |
+          ./unixnu defconfig liuqin_ipados27_defconfig -D ../device
+          ./unixnu fetch -D ../device
+          ./unixnu status --json -D ../device | tee "$RUNNER_TEMP/status.json"
+
+      - name: Build liuqin.dtb
+        id: dtb
+        working-directory: device
+        run: python3 scripts/build-liuqin-dtb.py
+
+      - name: Build arm64e iPadOS 27 kernel & MH_FILESET prelink
+        id: kernel
+        working-directory: UniXNU
+        run: ./unixnu build kernel -D ../device
+
+      - name: Prelink mapping summary
+        if: always()
+        working-directory: UniXNU
+        run: |
+          LOG=$(find out/liuqin -name prelink.log | head -1)
+          if [ -n "$LOG" ]; then
+            echo "== $LOG"
+            tail -n 20 "$LOG"
+          fi
+          REPORT=$(find out/liuqin -path '*/kernel/kernel.json' | head -1)
+          if [ -n "$REPORT" ]; then
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s,m=d.get("stubbed",{}),d.get("missing",{}); print("mapping_complete:", d.get("mapping_complete"), "allow_missing:", d.get("allow_missing")); print("stubbed targets:", sum(len(v) for v in s.values()), "missing targets:", sum(len(v) for v in m.values()))' "$REPORT"
+          fi
+
+      - name: Build UniXNU EFI package
+        id: package
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: UniXNU
+        run: ./unixnu build package -D ../device
+
+      - name: Build liuqinPkg UEFI firmware (SILICIUM_UEFI.fd)
+        id: firmware
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: UniXNU
+        run: ./unixnu build firmware -D ../device --uefi ../uefi-sheng
+
+      - name: Fetch and bundle 24A446 OS trust caches
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: UniXNU
+        run: |
+          ./unixnu ipsw fetch StaticTrustCache "Cryptex1,SystemTrustCache" -D ../device
+          python3 - <<'PY'
+          import struct, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from unixnu.ipsw import im4p_payload
+          base = Path('out/ipsw/24A446')
+          tcs = sorted(base.glob('*.trustcache'), key=lambda p: p.stat().st_size, reverse=True)
+          assert len(tcs) >= 2, f'Expected 2 trust caches, found {tcs}'
+          static = im4p_payload(tcs[0].read_bytes())
+          system = im4p_payload(tcs[1].read_bytes())
+          bundle = struct.pack('<3I', 2, 12, 12 + len(static)) + static + system
+          out = Path('build/liuqin-trust.bundle')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_bytes(bundle)
+          print(f'Bundled {tcs[0].name} ({len(static)}B) + {tcs[1].name} ({len(system)}B) -> {len(bundle)}B')
+          PY
+
+      - name: Build payload.img
+        id: payload
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: UniXNU
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          ./unixnu build payload -D ../device --uefi ../uefi-sheng \
+            --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID:-0x84750A0B0C0D0001}" \
+            --trust-cache build/liuqin-trust.bundle
+
+      - name: Build boot.img
+        id: bootimg
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        working-directory: UniXNU
+        run: |
+          ./unixnu bootimg -D ../device --uefi ../uefi-sheng \
+            --dtb ../device/build/liuqin/liuqin.dtb
+          ls -lh out/liuqin/*/*/boot/boot.img
+          shasum -a 256 out/liuqin/*/*/boot/boot.img
+
+      - name: Upload boot.img & kernel diagnostics
+        if: always() && steps.bootimg.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-ipados27-bootimg
+          path: |
+            UniXNU/out/liuqin/*/*/boot/boot.img
+            UniXNU/out/liuqin/*/*/payload/payload.json
+            UniXNU/out/liuqin/*/*/kernel/kernel.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-ipados27-logs
+          path: |
+            ${{ runner.temp }}/status.json
+            UniXNU/out/liuqin/*/*/logs/*.log
+            UniXNU/out/liuqin/*/*/kernel/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Clean Apple inputs
+        if: always()
+        run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Xiaomi Pad 6 Pro (liuqin, SM8475) — iPadOS 27.0.1 (24A446, arm64e)"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| resolve & fetch | ${{ steps.status.outcome }} |"
+            echo "| liuqin.dtb | ${{ steps.dtb.outcome }} |"
+            echo "| kernel + MH_FILESET prelink | ${{ steps.kernel.outcome }} |"
+            echo "| UniXNU.efi package | ${{ steps.package.outcome }} |"
+            echo "| SILICIUM_UEFI.fd | ${{ steps.firmware.outcome }} |"
+            echo "| payload.img | ${{ steps.payload.outcome }} |"
+            echo "| boot.img | ${{ steps.bootimg.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

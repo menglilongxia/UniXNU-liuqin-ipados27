@@ -1,0 +1,398 @@
+schema_version = 1
+
+[device]
+name = "liuqin"
+soc = "SM8475"
+os_profile = "ipados-27.0.1-24A446"
+summary = "Xiaomi Pad 6 Pro (liuqin, SM8475, 12GB/512GB) following official UniXNU-sheng Format 2 architecture: uefi-sheng WaipioPkg overlay + ipados-27.0.1-24A446 arm64e."
+
+[[area]]
+id = "configuration"
+status = "implemented"
+components = ["ArmDTPlatform", "ArmCpu", "XnuPrelink", "DarwinBoot", "AppleKeyStoreState"]
+paths = ["board.toml", "feeds.toml", "configs/**", ".github/**", ".gitignore", "local.toml.example", "README.md", "AGENTS.md", "package/.gitkeep", "soc/**", "patches/unixnu/**"]
+inputs = [
+  "Xiaomi Pad 6 Pro (liuqin), Qualcomm SM8475 (Cape), 12GB RAM + 512GB UFS",
+  "fastboot getvar all on real hardware (2026-11-24): product=liuqin, socid=531 (0x213), unlocked=yes, current-slot=a",
+  "Official UniXNU Format 2 schema and UniXNU-sheng reference configuration",
+]
+configuration = [
+  "board.toml selects os_profile=ipados-27.0.1-24A446 (arm64e), soc_source=sm8475, and official UniXNU components.",
+  "feeds.toml points sm8475 to UniXNU-sm8475-common (local override supported via local.toml).",
+]
+procedure = [
+  "Run ./unixnu defconfig liuqin_ipados27_defconfig -D ../UniXNU-liuqin && ./unixnu status --json.",
+]
+findings = [
+  "Following official UniXNU-sheng Format 2 with ipados-27.0.1-24A446 avoids the diverged iPadOS 18 pong fork and keeps compatibility with upstream drivers and HyperOS.",
+]
+completion = [
+  "Configuration resolves cleanly, porting-record.py passes, and all selected components resolve.",
+]
+limits = [
+  "Local feeds path is used until UniXNU-sm8475-common is published to a pinned remote commit.",
+]
+next_action = [
+  "Verify ./unixnu defconfig, fetch, and status on WSL2 host.",
+]
+evidence = [
+  { kind = "source", reference = "board.toml", result = "Format 2 board description targeting ipados-27.0.1-24A446 arm64e with verified 12GB/512GB liuqin parameters." },
+]
+
+[[area]]
+id = "firmware"
+status = "device-verified"
+components = []
+paths = ["firmware/**", "proprietary-files.txt", "scripts/prepare-uefi-overlay.*", "scripts/build-liuqin-dtb.*"]
+inputs = [
+  "UniXNU/uefi-sheng (Mu-Silicium with Silicon/Qualcomm/WaipioPkg)",
+  "Stock HyperOS OS3.0.7.0.VMYCNXM uefiplat.cfg (Stack 0xA760D000, Display Reserved 0xB8000000+0x2B00000)",
+  "fastboot getvar all: socid=531 (0x213), uefi_a=0x500000, boot_a=0xC000000",
+]
+configuration = [
+  "Platforms/Xiaomi/liuqinPkg uses WaipioPkg with LIUQIN_VENDOR_HW=0 and SimpleFbDxe (1800x2880, 32-bit).",
+  "Resources/Configs/liuqin.toml sets FD 0xA7100000 + 0x300000 (0xA7000000..0xA7100000 kept as FD Reserved), BootShim ARM64 header, gzip+dtb, boot image header v4.",
+]
+procedure = [
+  "Run ./unixnu build package && ./unixnu build firmware && ./unixnu bootimg --ramdisk none, then fastboot boot boot.img.",
+]
+findings = [
+  "FD_BASE=0xA7000000 booted SEC to screen but failed FV LZMA decompression (Decompress Failed - Invalid Parameter) because 0xA7000000..0xA7100000 is FD Reserved/ramoops on SM8475.",
+  "Moving FD_BASE to 0xA7100000 (+0x300000) booted cleanly through SEC, DXE, GIC/Timer, SimpleFbDxe (1800x2880), and displayed the UniXNU v0.1.0 UEFI menu with live countdown on HyperOS without any vendor DXE blobs.",
+  "Android boot image v4 prepends Xiaomi's LZ4 vendor_ramdisk ahead of boot.img's FAT32 payload in /chosen/linux,initrd-start; patches/unixnu/0001-ramdisk-find-fat-in-initrd.patch scans past vendor_ramdisk to locate FAT32/UNXNFAT1 and was verified on hardware to mount LIUQINESP and boot iPadOS 27 (liuqin) via DarwinBoot.",
+]
+completion = [
+  "SILICIUM_UEFI.fd and boot.img build cleanly and fastboot boot displays the UniXNU UEFI menu and launches DarwinBoot on the tablet.",
+]
+limits = [
+  "Full MH_FILESET prelinked iPadOS 27.0.1 kernel build via GitHub Actions macos-26 is the next milestone.",
+]
+next_action = [
+  "Run GitHub Actions macos-26 workflow to emit the full Apple Clang + LTO MH_FILESET boot.img and test on hardware.",
+]
+evidence = [
+  { kind = "device", reference = "firmware/Resources/Configs/liuqin.toml", command = "fastboot boot liuqin-stage1-uefi.img", revision = "2b2fc0609b0fc28b01f9d2380523ced4c59a907a", result = "fastboot boot of liuqin-stage1-uefi.img (sha256 680ee381) on HyperOS 12GB/512GB Xiaomi Pad 6 Pro reached UniXNU v0.1.0 UEFI menu at 1800x2880 with working countdown timer and 0 failed drivers." },
+  { kind = "device", reference = "patches/unixnu/0001-ramdisk-find-fat-in-initrd.patch", command = "fastboot boot liuqin-stage2c-v4fat.img", revision = "2b2fc0609b0fc28b01f9d2380523ced4c59a907a", result = "fastboot boot of liuqin-stage2c-v4fat.img (sha256 55fa9a1d) skipped v4 vendor_ramdisk, mounted \\EFI\\UniXNU\\unixnu.toml, displayed entry 1 iPadOS 27 (liuqin), and ran DarwinBoot -> XNU _start -> MMU enable (green + blue + magenta entry probe bars on 1800x2880 screen)." },
+]
+
+[[area]]
+id = "cpu"
+status = "implemented"
+components = []
+paths = ["package/CpuFreq*", "scripts/*armcpu*"]
+inputs = [
+  "SM8475: 4x Cortex-A510 (E) + 3x Cortex-A710 (P) + 1x Cortex-X2 (P), MPIDR Affinity1 0x000..0x700",
+  "GICv3 GICD 0x17100000, GICR 0x17180000 (stride 0x40000), arch timer 19.2 MHz, PSCI SMC",
+]
+configuration = [
+  "UniXNU-sm8475-common provides native-smp-secondary.patch and timers-avoid-trapped-physical-timer.patch for Qualcomm Gunyah.",
+]
+procedure = [
+  "Boot arm64e iPadOS 27 kernel via fastboot boot and verify PAC key writes, MMU enable, virtual timer, PSCI reset, and secondary core bring-up.",
+]
+findings = [
+  "Device-verified on SM8475 HyperOS (2026-11-25): arm64e XNU _start, PAC_INIT_KEY_STATE, SCTLR_EL1 MMU+PAC enable, cntvct_el0 virtual counter, and PSCI SMC #0 SYSTEM_RESET all succeeded on hardware (liuqin-stage2g-probe-cntvct.img rebooted cleanly after Stage 3).",
+  "Gunyah traps CNTP_* physical timer writes and physical counter probe reads; virtual timer CNTVCT_EL0 works cleanly.",
+]
+completion = [
+  "Primary CPU passes PAC and timer gates and all 8 cores online under XNU.",
+]
+limits = [
+  "Secondary core online and full SMP validation await the Apple Clang + LTO MH_FILESET kernel from macos-26 CI.",
+]
+next_action = [
+  "Build full MH_FILESET arm64e kernel via GitHub Actions macos-26 runner and verify 8-core SMP + ShengUfs on hardware.",
+]
+evidence = [
+  { kind = "device", reference = "soc/sm8475/patches/xnu-12377/timers-avoid-trapped-physical-timer.patch", command = "fastboot boot liuqin-stage2g-probe-cntvct.img", revision = "2b2fc0609b0fc28b01f9d2380523ced4c59a907a", result = "Stage 3 entry probe (cntvct_el0 2s wait + PSCI SMC #0 SYSTEM_RESET placed after MSR SCTLR_EL1 + ISB) executed past MMU+PAC enable and cleanly rebooted the SM8475 Pad 6 Pro." },
+]
+
+[[area]]
+id = "memory"
+status = "implemented"
+components = []
+paths = ["dts/**"]
+inputs = [
+  "12GB LPDDR5 Xiaomi Pad 6 Pro; stock HyperOS uefiplat.cfg low-DDR reservations and HYP Reserved 0x830000000+0x10000000",
+]
+configuration = [
+  "MemoryMapLib.c declares stock low-DDR reservations plus conservative high DRAM conventional windows (0x800000000+0x30000000 and 0x840000000+0x12E000000) for DarwinBoot.",
+  "dts/liuqin.dts declares nominal memory@80000000, splash_region 0xb8000000, ramoops 0xa7000000, and adsp_region 0x9fd00000.",
+]
+procedure = [
+  "Verify DarwinBoot allocates its 4 GiB owned_memory_size window from the UEFI memory map without colliding with HYP/TZ/PIL reservations.",
+]
+findings = [
+  "Conservative high DRAM range stays below 0x96E000000 so it is valid even before dumping the live 12GB /sys/firmware/fdt.",
+]
+completion = [
+  "DarwinBoot allocates its owned window and XNU boots without memory faults; live 12GB FDT banks are recorded.",
+]
+limits = [
+  "Upper 12GB banks above 0x96E000000 are not yet exposed until live /sys/firmware/fdt is dumped.",
+]
+next_action = [
+  "Confirm UEFI memory map and dump live ABL FDT once booted.",
+]
+evidence = [
+  { kind = "source", reference = "dts/liuqin.dts", result = "Board DTS including sm8475.dtsi with verified socid 531, splash_region, ramoops, and ADSP carveout." },
+]
+
+[[area]]
+id = "storage"
+status = "planned"
+components = ["ShengUfs", "RamBlock", "VerifiedRoot", "VirtioMmioBlock"]
+paths = ["drivers/ShengUfs", "package/**", "scripts/policies/**", "scripts/*ufs*", "scripts/*storage*", "scripts/*userdata*"]
+inputs = [
+  "UFS 3.1 host 0x1d84000 (SPI 265), SM8475 QMP v6 PHY 0x1d80000",
+  "fastboot getvar all (2026-11-24): logical-block-size=4096, partition-size:userdata=0x73D3DFB000 (463.31 GiB)",
+]
+configuration = [
+  "board.toml [userdata] records first_lba=2758144 (0x2A1600), last_lba=124212218 (0x76753FA), lba_bytes=4096.",
+  "Selects official ShengUfs and RamBlock components.",
+]
+procedure = [
+  "Verify ShengUfs enumerates LUN 0 and mounts the APFS OS, SystemOS, and Data volumes.",
+]
+findings = [
+  "512GB userdata size differs from 128GB/256GB community ports and was measured directly from this device via fastboot.",
+]
+completion = [
+  "ShengUfs reads/writes LUN 0 and XNU mounts the iPadOS 27 APFS root and Data volumes.",
+]
+limits = [
+  "Requires Stage 2 arm64e kernel build and verification of SM8475 UFS PHY/SMMU register behavior under ShengUfs.",
+]
+next_action = [
+  "Build Stage 2 kernel and verify ShengUfs LUN 0 detection on hardware.",
+]
+evidence = []
+
+[[area]]
+id = "display"
+status = "planned"
+components = ["GopFramebuffer"]
+paths = ["package/*Display*", "package/*Backlight*", "scripts/*display*"]
+inputs = [
+  "1800x2880 dual-DSI DSC video mode LCD (CSOT m81_42_02_0b or Tianma m81_36_02_0a), ABL splash 0xb8000000 + 0x2b00000",
+  "KTZ8866 backlight controller on QUP0 SE1 (i2c@984000, addr 0x11)",
+]
+configuration = [
+  "SimpleFbDxe publishes 1800x2880x32 GOP in UEFI; GopFramebuffer provides initial XNU software scanout.",
+]
+procedure = [
+  "Verify UEFI menu rendering at 1800x2880, then enable GopFramebuffer presentation to SpringBoard, then add KTZ8866 backlight control.",
+]
+findings = [
+  "ABL leaves the continuous splash framebuffer active at 0xb8000000 (stride 7200 bytes).",
+]
+completion = [
+  "SpringBoard renders cleanly via GopFramebuffer and brightness control works via KTZ8866.",
+]
+limits = [
+  "No KTZ8866 backlight driver or DPU scanout yet.",
+]
+next_action = [
+  "Verify 1800x2880 SimpleFbDxe output during Stage 1 UEFI boot.",
+]
+evidence = []
+
+[[area]]
+id = "input"
+status = "planned"
+components = []
+paths = ["drivers/ShengNovatekTouch", "package/*Touch*", "package/*Input*"]
+inputs = [
+  "Novatek NT36532 flashless TDDI touch on QUP0 SE4 (spi@990000, CS0, IRQ GPIO21, no reset line)",
+  "PMIC PON power/vol-down and PM8350 GPIO6 vol-up buttons",
+]
+configuration = [
+  "Input drivers are deferred until Stage 2 kernel boots; planned to adapt official ShengNovatekTouch + QcomGeniSpi + ShengHidInput.",
+]
+procedure = [
+  "Determine panel vendor (CSOT vs Tianma), adapt ShengNovatekTouch for NT36532 firmware download, and wire HID events.",
+]
+findings = [
+  "sheng uses Novatek NT36532E over GENI SPI, making ShengNovatekTouch + QcomGeniSpi a direct upstream baseline.",
+]
+completion = [
+  "Multi-touch and physical volume/power buttons work reliably in SpringBoard.",
+]
+limits = [
+  "Not yet enabled.",
+]
+next_action = [
+  "Adapt ShengNovatekTouch after Stage 2 reaches userspace.",
+]
+evidence = []
+
+[[area]]
+id = "gpu"
+status = "planned"
+components = []
+paths = ["drivers/Adreno*", "package/*Adreno*", "scripts/*adreno*"]
+inputs = [
+  "Adreno 730 (0x3d00000), GMU 730.1 (0x3d6a000, pdc 0xb290000), GPU SMMU (0x3da0000), device-signed a730_zap firmware",
+]
+configuration = [
+  "GPU nodes stay disabled in sm8475.dtsi; CONFIG_XNU_NATIVE_ADRENO is unset.",
+]
+procedure = [
+  "Port Adreno 730 GMU/ZAP/SMMU and ring submission into an Adreno730 component compatible with upstream AdrenoMetal.",
+]
+findings = [
+  "Do not point SM8550 Adreno740 at Adreno 730 registers without A730 GMU/register adaptation.",
+]
+completion = [
+  "Hardware-accelerated Metal rendering via Turnip + AdrenoMetal drives SpringBoard.",
+]
+limits = [
+  "Software rendering only during Stage 1-2 bring-up.",
+]
+next_action = [
+  "Reach SpringBoard via GopFramebuffer first, then port Adreno 730.",
+]
+evidence = []
+
+[[area]]
+id = "network"
+status = "planned"
+components = []
+paths = ["drivers/Ath*", "package/*Wifi*", "package/*Bluetooth*"]
+inputs = [
+  "Qualcomm QCA6490 Wi-Fi/BT over PCIe0 (wlan-enable gpio80, reset gpio94, clkreq gpio95, wake gpio96, xo-clk gpio204; board cal bd_m81gf.elf)",
+]
+configuration = [
+  "Disabled during Stage 1-2 bring-up.",
+]
+procedure = [
+  "Enable PCIe0 + QCA6490 ath11k bring-up and QCA6490 UART Bluetooth after core desktop boots.",
+]
+findings = [
+  "liuqin uses QCA6490 (ath11k), whereas sheng uses WCN7850 (ath12k).",
+]
+completion = [
+  "Wi-Fi joins WPA2/WPA3 networks and Bluetooth pairs peripherals.",
+]
+limits = [
+  "Not yet implemented.",
+]
+next_action = [
+  "Port QCA6490 PCIe0/ath11k after desktop bring-up.",
+]
+evidence = []
+
+[[area]]
+id = "audio"
+status = "planned"
+components = []
+paths = ["package/*Audio*", "package/*Adsp*", "scripts/*audio*"]
+inputs = [
+  "4x Cirrus Logic CS35L41 smart amplifiers + WCD9385 codec + ADSP AudioReach (adsp_region 0x9fd00000+0x3100000)",
+]
+configuration = [
+  "Disabled during Stage 1-2 bring-up.",
+]
+procedure = [
+  "Bring up ADSP PAS1 + GLINK/GPR and CS35L41 amplifier initialization.",
+]
+findings = [
+  "Same CS35L41 + Xiaomi SM8475 ADSP layout as zizhan.",
+]
+completion = [
+  "Quad-speaker playback and microphone capture work through iPadOS Audio HAL.",
+]
+limits = [
+  "Not yet implemented.",
+]
+next_action = [
+  "Enable after power/ADSP bring-up.",
+]
+evidence = []
+
+[[area]]
+id = "power"
+status = "planned"
+components = []
+paths = ["package/*Power*", "package/*Battery*", "scripts/*power*"]
+inputs = [
+  "PM8350/PM8350B/PM8350C/PM8450/PMK8350/PMR735A PMIC family; ADSP PMIC GLINK battery telemetry",
+]
+configuration = [
+  "sleep-disabled=1 and vmm-present=1 in ADT defaults for bring-up.",
+]
+procedure = [
+  "Bring up ADSP GLINK battery/charger reporting, PSCI shutdown/reboot, and TSENS thermal throttling.",
+]
+findings = [
+  "Xiaomi SM8475 PMIC GLINK battery property indices shift after index 12 (reference: UniXNU-zizhan).",
+]
+completion = [
+  "Accurate battery percentage, charging state, clean power-off, and thermal throttling work.",
+]
+limits = [
+  "Not yet implemented.",
+]
+next_action = [
+  "Bring up after Stage 2 desktop.",
+]
+evidence = []
+
+[[area]]
+id = "packaging"
+status = "implemented"
+components = []
+paths = ["scripts/package.sh", "patches/**"]
+inputs = [
+  "UniXNU build driver (./unixnu) and GitHub Actions macos-26 runner",
+]
+configuration = [
+  "scripts/package.sh follows the verbatim UniXNU Format 2 packaging contract.",
+  ".github/workflows/macos-build.yml builds the arm64e iPadOS 27.0.1 kernel, prelink, firmware, payload, and boot.img.",
+]
+procedure = [
+  "Build Stage 1 UEFI + boot.img locally in WSL2; build Stage 2 arm64e kernel + payload via GitHub Actions macos-build.yml.",
+]
+findings = [
+  "Local WSL2 builds EDK2 UEFI and Android v4 boot images cleanly without macOS; GitHub Actions macos-26 handles Xcode arm64e XNU builds.",
+]
+completion = [
+  "End-to-end boot.img builds reproducibly for both Stage 1 (UEFI menu) and Stage 2 (full iPadOS 27 payload).",
+]
+limits = [
+  "macOS CI workflow has not yet been triggered on a remote GitHub repository.",
+]
+next_action = [
+  "Build and verify Stage 1 UEFI boot.img locally in WSL2 first.",
+]
+evidence = [
+  { kind = "source", reference = ".github/workflows/macos-build.yml", result = "GitHub Actions macos-26 workflow for arm64e iPadOS 27.0.1 kernel and full image assembly." },
+]
+
+[[area]]
+id = "diagnostics"
+status = "planned"
+components = []
+paths = ["scripts/check-*", "package/*Diagnostic*", "unixnu.lock"]
+inputs = [
+  "UEFI SimpleFbDxe on-screen console, XNU panic_screen=true, and stock ramoops at 0xA7000000 (4 MiB)",
+]
+configuration = [
+  "panic_screen=true in board.toml [payload]; PcdDebugPrintErrorLevel=0x80000000 in liuqin.dsc.",
+]
+procedure = [
+  "Capture UEFI console and XNU panic screen visually, and inspect ramoops pstore when Android is available.",
+]
+findings = [
+  "Setting PcdDebugPrintErrorLevel to errors-only keeps early UEFI/UniXNURamDiskDxe diagnostics legible on the 1800x2880 display.",
+]
+completion = [
+  "UEFI and early XNU boot checkpoints are clearly observable on screen without a hardware UART.",
+]
+limits = [
+  "No automated log capture loop yet.",
+]
+next_action = [
+  "Observe Stage 1 UEFI boot output on hardware.",
+]
+evidence = []

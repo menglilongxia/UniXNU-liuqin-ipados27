@@ -1,0 +1,140 @@
+name: macOS userdata image (liuqin)
+
+# Builds the raw SHNGROOT userdata image (iPadOS 27.0.1 24A446 OS + SystemOS)
+# for the Xiaomi Pad 6 Pro (liuqin) userdata partition using macOS /usr/bin/aea.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liuqin-userdata-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  userdata:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      UNIXNU_DEVICE: ${{ github.workspace }}/device
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Select newest Xcode 26 SDK
+        run: |
+          XCODE_DIR=$(ls -d /Applications/Xcode_26*.app/Contents/Developer /Applications/Xcode.app/Contents/Developer 2>/dev/null | sort -V | tail -1)
+          echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          echo "Using DEVELOPER_DIR=$XCODE_DIR"
+
+      - name: Check out UniXNU-liuqin (device repo)
+        uses: actions/checkout@v4
+        with:
+          path: device
+          persist-credentials: false
+
+      - name: Stage vendored SM8475 SoC repository
+        run: |
+          rm -rf UniXNU-sm8475-common
+          cp -R device/soc/sm8475 UniXNU-sm8475-common
+
+      - name: Check out UniXNU/UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 8542980d02b4d2cc5c32ee3542de1760b2562aac
+          submodules: recursive
+          path: UniXNU
+          persist-credentials: false
+
+      - name: Apply device-side UniXNU patches
+        working-directory: UniXNU
+        run: |
+          shopt -s nullglob
+          for patch in ../device/patches/unixnu/*.patch; do
+            echo "Applying $(basename "$patch")"
+            git apply "$patch"
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install host tools
+        run: |
+          brew install llvm lld mtools dtc blacktop/tap/ipsw
+          if ! command -v unifdef >/dev/null; then
+            brew install unifdef
+            echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Report toolchain and disk
+        run: |
+          sw_vers
+          uname -m
+          python3 --version
+          command -v ipsw
+          test -x /usr/bin/aea && echo "/usr/bin/aea present"
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Resolve configuration
+        working-directory: UniXNU
+        run: |
+          ./unixnu defconfig liuqin_ipados27_defconfig -D ../device
+          ./unixnu fetch -D ../device
+          ./unixnu status --json -D ../device | tee "$RUNNER_TEMP/status.json"
+
+      - name: Build userdata-root.img
+        working-directory: UniXNU
+        run: |
+          ./unixnu userdata -D ../device
+          df -h "$GITHUB_WORKSPACE"
+          REPORT=$(find out/liuqin -path '*/userdata/userdata-root.json' | head -1)
+          test -n "$REPORT" || { echo "::error::no userdata-root.json"; exit 1; }
+          cat "$REPORT"
+
+      - name: Split userdata-root.img into upload-sized chunks
+        working-directory: UniXNU
+        run: |
+          IMAGE=$(find out/liuqin -path '*/userdata/userdata-root.img' | head -1)
+          test -n "$IMAGE" || { echo "::error::no userdata-root.img"; exit 1; }
+          DIR=$(dirname "$IMAGE")
+          mkdir -p "$DIR/parts/aa" "$DIR/parts/ab"
+          split -b 1900m -d -a 2 "$IMAGE" "$DIR/parts/chunk-"
+          i=0
+          for part in "$DIR"/parts/chunk-*; do
+            if [ $i -lt 4 ]; then mv "$part" "$DIR/parts/aa/"; else mv "$part" "$DIR/parts/ab/"; fi
+            i=$((i + 1))
+          done
+          cp "$DIR/userdata-root.json" "$DIR/parts/aa/" 2>/dev/null || true
+          ls -lh "$DIR/parts/aa" "$DIR/parts/ab"
+          shasum -a 256 "$DIR"/parts/aa/* "$DIR"/parts/ab/* | tee "$DIR/parts/aa/SHA256SUMS.txt"
+
+      - name: Upload userdata chunks A
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-userdata-aa
+          path: UniXNU/out/liuqin/*/*/userdata/parts/aa/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload userdata chunks B
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-userdata-ab
+          path: UniXNU/out/liuqin/*/*/userdata/parts/ab/*
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Clean Apple inputs
+        if: always()
+        run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds UniXNU/out/liuqin/*/*/userdata/userdata-root.img

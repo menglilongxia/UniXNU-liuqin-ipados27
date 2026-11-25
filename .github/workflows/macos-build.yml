@@ -106,7 +106,7 @@ jobs:
 
       - name: Install host tools
         run: |
-          brew install llvm lld mtools dtc nasm
+          brew install llvm lld mtools dtc nasm blacktop/tap/ipsw
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           if ! command -v unifdef >/dev/null; then
@@ -129,6 +129,56 @@ jobs:
           ./unixnu defconfig liuqin_ipados27_defconfig -D ../device
           ./unixnu fetch -D ../device
           ./unixnu status --json -D ../device | tee "$RUNNER_TEMP/status.json"
+
+      - name: Restore cached Data seed
+        id: data-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: UniXNU/build/liuqin-data.dbr
+          key: liuqin-data-seed-v1-24A446
+
+      - name: Prepare Data seed (--skip-setup)
+        id: data
+        working-directory: UniXNU
+        run: |
+          if [ ! -f build/liuqin-data.dbr ]; then
+            os_image=$(./unixnu ipsw fetch OS -D ../device | tail -1)
+            python3 ../device/scripts/build-liuqin-data-seed.py \
+              --unixnu . --os-image "$os_image" \
+              --output build/liuqin-data.dbr --gib 64 --build 24A446 --skip-setup
+          else
+            python3 ../device/scripts/build-liuqin-data-seed.py \
+              --unixnu . --output build/liuqin-data.dbr --gib 64 --build 24A446 \
+              --skip-setup --if-missing
+          fi
+
+      - name: Bind Data volume UUID to kernel defconfig
+        working-directory: UniXNU
+        run: |
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          seed = json.loads(Path('build/liuqin-data.dbr.json').read_text())
+          config = Path('../device/configs/liuqin_ipados27_defconfig')
+          text = config.read_text()
+          if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' not in text:
+              text += 'CONFIG_XNU_OWNER_DATA_MOUNT=y\n'
+          value = f'CONFIG_XNU_OWNER_DATA_VOLUME_UUID="{seed["uuid"]}"'
+          if re.search(r'^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=', text, re.M):
+              text = re.sub(r'^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=.*$', value, text, flags=re.M)
+          else:
+              text += value + '\n'
+          config.write_text(text)
+          print('Bound Data UUID', seed['uuid'], 'seed bytes', seed['bytes'])
+          PY
+          ./unixnu defconfig liuqin_ipados27_defconfig -D ../device
+
+      - name: Save Data seed cache
+        if: steps.data-cache.outputs.cache-hit != 'true' && steps.data.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: UniXNU/build/liuqin-data.dbr
+          key: liuqin-data-seed-v1-24A446
 
       - name: Build liuqin.dtb
         id: dtb
@@ -197,7 +247,8 @@ jobs:
         run: |
           ./unixnu build payload -D ../device --uefi ../uefi-sheng \
             --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID:-0x84750A0B0C0D0001}" \
-            --trust-cache build/liuqin-trust.bundle
+            --trust-cache build/liuqin-trust.bundle \
+            --data-ramdisk build/liuqin-data.dbr
 
       - name: Build boot.img
         id: bootimg
@@ -218,6 +269,7 @@ jobs:
             UniXNU/out/liuqin/*/*/boot/boot.img
             UniXNU/out/liuqin/*/*/payload/payload.json
             UniXNU/out/liuqin/*/*/kernel/kernel.json
+            UniXNU/build/liuqin-data.dbr.json
           if-no-files-found: error
           retention-days: 7
 

@@ -86,15 +86,6 @@
         method = "smc";
     };
 
-    timer {
-        compatible = "arm,armv8-timer";
-        interrupts = <1 13 0x4 0>,
-                     <1 14 0x4 0>,
-                     <1 11 0x4 0>,
-                     <1 10 0x4 0>;
-        clock-frequency = <19200000>;
-    };
-
     soc: soc {
         compatible = "simple-bus";
         #address-cells = <2>;
@@ -114,11 +105,14 @@
         };
 
         // UFS 3.1 host controller (SM8475 cape)
+        // Note: Omit `interrupts` from the exported ADT node (matching sm8550.dtsi):
+        // devicetree.py emits `phandle` rather than `AAPL,phandle`, so an exported
+        // `interrupts` property causes XNU's IODTFindInterruptParent() to return NULL
+        // and data-abort in IODTGetICellCounts().
         ufs: ufshc@1d84000 {
             compatible = "qcom,sm8475-ufshc", "qcom,ufshc", "jedec,ufs-2.0";
             unixnu,adt-name = "ufshc";
             reg = <0x0 0x1d84000 0x0 0x3000>;
-            interrupts = <0 265 4 0>;
             status = "disabled";
         };
 

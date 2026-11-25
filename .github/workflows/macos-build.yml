@@ -221,6 +221,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Print failure logs inline
+        if: failure()
+        working-directory: UniXNU
+        run: |
+          for f in $(find out/liuqin -name '*.log' -o -name 'lto-build.log' | sort); do
+            if grep -qE "Undefined symbols|error:|failed|regression" "$f" 2>/dev/null; then
+              echo "=== $f (tail) ==="
+              tail -n 35 "$f"
+            fi
+          done
+
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4

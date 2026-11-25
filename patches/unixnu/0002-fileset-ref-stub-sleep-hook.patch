@@ -1,0 +1,13 @@
+diff --git a/scripts/build-fileset-release-reference.py b/scripts/build-fileset-release-reference.py
+index 2e87000..8a49915 100644
+--- a/scripts/build-fileset-release-reference.py
++++ b/scripts/build-fileset-release-reference.py
+@@ -151,7 +151,7 @@ def main():
+     build_log = (output / f'{mode}-build.log').read_text()
+     require_link_phase(output / f'{mode}-obj/RELEASE_ARM64_BCM2837', options.lto,
+                        result.returncode, build_log, output / f'{mode}-build.log')
+-    stub_names = sorted(set(re.findall(r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture))"', build_log, re.M)))
++    stub_names = sorted(set(re.findall(r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture|arm64_platform_sleep_hook))"', build_log, re.M)))
+     if stub_names:
+         (output / 'native-stubs.c').write_text(''.join(f'long {name[1:]};\n' for name in stub_names))   # the linker names carry the leading underscore
+         iphoneos = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()

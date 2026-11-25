@@ -8,9 +8,16 @@ volatile unsigned int boot_log_state, boot_log_rounds, boot_log_errors;
 const char *volatile boot_log_open_refusal = "boot log not ported (liuqin bring-up)";
 
 // ArmCpu references arm64_platform_sleep_hook as weak_import; static arm64e
-// kernel linking requires a concrete symbol definition when platform sleep
-// patch is not enabled.
+// kernel linking requires concrete hidden definitions so ld emits zero
+// DYLD_CHAINED_IMPORT entries (which XnuPrelink rejects).
 void (*arm64_platform_sleep_hook)(int boot_cpu) = 0;
+__attribute__((weak, visibility("hidden"))) void *sheng_pmu_fixup = 0;
+__attribute__((weak, visibility("hidden"))) int unixnu_armcpu_spi_mask_refuse(unsigned int irq, int refuse)
+{
+    (void) irq;
+    (void) refuse;
+    return -536870201; /* kIOReturnUnsupported: UFS stays in polling mode */
+}
 
 void boot_log_tick(unsigned now)
 {

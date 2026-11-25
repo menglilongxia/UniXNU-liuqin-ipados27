@@ -379,15 +379,15 @@ extern "C" int boot_progress_prepare_scanout(void) {return 1;}
 extern "C" void boot_progress_cancel_scanout(void) {}
 extern "C" void boot_progress_stage(const char *) {}
 extern "C" int boot_progress_pulse_anchor(uintptr_t,uint64_t,unsigned,unsigned,unsigned) {return 0;}
-// Optional GPU/DPU/trace symbols: weak no-op defaults until Adreno 730 / DPU lands on liuqin.
-extern "C" __attribute__((weak)) bool native_adreno_fences(uint32_t *, uint32_t *) {return false;}
-extern "C" __attribute__((weak)) bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) {return false;}
-extern "C" __attribute__((weak)) uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) {return 0;}
-extern "C" __attribute__((weak)) volatile uint32_t native_ufs_dpu_state = 0;
-extern "C" __attribute__((weak)) int native_gpu_trace_enabled(void) {return 0;}
-extern "C" __attribute__((weak)) void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
-extern "C" __attribute__((weak)) uint32_t native_gpu_trace_snapshot(void *, uint32_t) {return 0;}
-extern "C" __attribute__((weak)) int boot_kthread_report_nth(const char *, unsigned, char *, unsigned, char *, unsigned) {return -1;}
+// Optional GPU/DPU/trace symbols: hidden weak no-op defaults so ld emits zero chained fixup imports.
+extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences(uint32_t *, uint32_t *) {return false;}
+extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) {return false;}
+extern "C" __attribute__((weak, visibility("hidden"))) uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) {return 0;}
+extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_ufs_dpu_state = 0;
+extern "C" __attribute__((weak, visibility("hidden"))) int native_gpu_trace_enabled(void) {return 0;}
+extern "C" __attribute__((weak, visibility("hidden"))) void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
+extern "C" __attribute__((weak, visibility("hidden"))) uint32_t native_gpu_trace_snapshot(void *, uint32_t) {return 0;}
+extern "C" __attribute__((weak, visibility("hidden"))) int boot_kthread_report_nth(const char *, unsigned, char *, unsigned, char *, unsigned) {return -1;}
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 # The keystore state service (AppleKeyStoreState) and its probe, unchanged from iPadOS 17.

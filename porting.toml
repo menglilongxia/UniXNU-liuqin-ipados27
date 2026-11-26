@@ -166,7 +166,9 @@ limits = [
 next_action = [
   "Build Stage 2 kernel and verify ShengUfs LUN 0 detection on hardware.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "display"
@@ -195,7 +197,9 @@ limits = [
 next_action = [
   "Verify 1800x2880 SimpleFbDxe output during Stage 1 UEFI boot.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "input"
@@ -224,7 +228,9 @@ limits = [
 next_action = [
   "Adapt ShengNovatekTouch after Stage 2 reaches userspace.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "gpu"
@@ -252,7 +258,9 @@ limits = [
 next_action = [
   "Reach SpringBoard via GopFramebuffer first, then port Adreno 730.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "network"
@@ -280,7 +288,9 @@ limits = [
 next_action = [
   "Port QCA6490 PCIe0/ath11k after desktop bring-up.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "audio"
@@ -308,7 +318,9 @@ limits = [
 next_action = [
   "Enable after power/ADSP bring-up.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "power"
@@ -336,7 +348,9 @@ limits = [
 next_action = [
   "Bring up after Stage 2 desktop.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]
 
 [[area]]
 id = "packaging"
@@ -395,4 +409,6 @@ limits = [
 next_action = [
   "Observe Stage 1 UEFI boot output on hardware.",
 ]
-evidence = []
+evidence = [
+  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+]

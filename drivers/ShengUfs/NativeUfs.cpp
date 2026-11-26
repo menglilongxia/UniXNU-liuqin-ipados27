@@ -103,14 +103,20 @@ public:
 
 OSDefineMetaClassAndStructors (NativeUfs, IOService)
 
-static uint32_t read32 (uintptr_t base, unsigned offset)
+// Non-writeback single-register MMIO accessors: Qualcomm Gunyah EL2 traps Stage-2 MMIO
+// faults on apps_smmu (0x15000000) and requires ESR_EL2.ISV=1 (no post-indexed [x1], #4).
+static inline uint32_t read32 (uintptr_t base, unsigned offset)
 {
-  return *reinterpret_cast<volatile uint32_t *> (base + offset);
+  uint32_t value;
+  uintptr_t addr = base + offset;
+  __asm__ volatile ("ldr %w0, [%1]" : "=r" (value) : "r" (addr) : "memory");
+  return value;
 }
 
-static void write32 (uintptr_t base, unsigned offset, uint32_t value)
+static inline void write32 (uintptr_t base, unsigned offset, uint32_t value)
 {
-  *reinterpret_cast<volatile uint32_t *> (base + offset) = value;
+  uintptr_t addr = base + offset;
+  __asm__ volatile ("str %w0, [%1]" :: "r" (value), "r" (addr) : "memory");
 }
 
 static bool contains (const char *data, size_t length, const char *needle)
@@ -191,6 +197,48 @@ static uintptr_t mapPhys (uint64_t phys, uint64_t length, OSSharedPtr<IOMemoryMa
   return keep ? static_cast<uintptr_t> (keep->getVirtualAddress ()) : 0;
 }
 
+static void ensureUfsClocks (uint32_t *aggreOut = nullptr, uint32_t *iceOut = nullptr)
+{
+  uint32_t clkFix = 1;
+  PE_parse_boot_argn ("ufs-clk-fix", &clkFix, sizeof (clkFix));
+  OSSharedPtr<IOMemoryMap> gccMap;
+  uintptr_t gcc = mapPhys (GCC_BASE + GCC_UFS_WINDOW, 0x1000, gccMap);
+  if (!gcc) {
+    return;
+  }
+  const unsigned regs[6] = {
+    GCC_UFS_PHY_AXI_ENABLE,
+    GCC_UFS_PHY_AHB_ENABLE,
+    GCC_UFS_PHY_UNIPRO_CORE_ENABLE,
+    GCC_UFS_PHY_ICE_CORE_ENABLE,
+    GCC_AGGRE_UFS_PHY_AXI_ENABLE,
+    GCC_UFS_PHY_RX_SYMBOL1_ENABLE,
+  };
+  if (clkFix != 0) {
+    for (unsigned i = 0; i < 6; ++i) {
+      unsigned off = regs[i] - GCC_UFS_WINDOW;
+      uint32_t val = read32 (gcc, off);
+      uint32_t want = val | GCC_UFS_BRANCH_ENABLE_BIT;
+      if (clkFix >= 2) {
+        want &= ~2U; // clear HW clock-gating bit when forcing clocks on
+        if (regs[i] == GCC_UFS_PHY_ICE_CORE_ENABLE) {
+          want |= (1U << 14); // FORCE_MEM_CORE_ON (gcc-sm8450.c)
+        }
+      }
+      if (want != val) {
+        write32 (gcc, off, want);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        for (unsigned spin = 0; spin < 10000; ++spin) {
+          if (!(read32 (gcc, off) & 0x80000000U)) break;
+          IODelay (1);
+        }
+      }
+    }
+  }
+  if (aggreOut) *aggreOut = read32 (gcc, GCC_AGGRE_UFS_PHY_AXI_ENABLE - GCC_UFS_WINDOW);
+  if (iceOut) *iceOut = read32 (gcc, GCC_UFS_PHY_ICE_CORE_ENABLE - GCC_UFS_WINDOW);
+}
+
 void NativeUfs::inspect (void)
 {
   OSSharedPtr<IOMemoryMap> gccMap, hcMap;
@@ -202,35 +250,45 @@ void NativeUfs::inspect (void)
   uint32_t axi = read32 (gcc, GCC_UFS_PHY_AXI_ENABLE - GCC_UFS_WINDOW);
   uint32_t ahb = read32 (gcc, GCC_UFS_PHY_AHB_ENABLE - GCC_UFS_WINDOW);
   uint32_t unipro = read32 (gcc, GCC_UFS_PHY_UNIPRO_CORE_ENABLE - GCC_UFS_WINDOW);
+  uint32_t ice = read32 (gcc, GCC_UFS_PHY_ICE_CORE_ENABLE - GCC_UFS_WINDOW);
+  uint32_t aggre = read32 (gcc, GCC_AGGRE_UFS_PHY_AXI_ENABLE - GCC_UFS_WINDOW);
   uint32_t txs = read32 (gcc, GCC_UFS_PHY_TX_SYMBOL0_ENABLE - GCC_UFS_WINDOW);
   uint32_t rxs = read32 (gcc, GCC_UFS_PHY_RX_SYMBOL0_ENABLE - GCC_UFS_WINDOW);
+  uint32_t rx1 = read32 (gcc, GCC_UFS_PHY_RX_SYMBOL1_ENABLE - GCC_UFS_WINDOW);
   uint32_t aux = read32 (gcc, GCC_UFS_PHY_PHY_AUX_ENABLE - GCC_UFS_WINDOW);
   // GDSCR bit31 PWR_ON; CBCR bit31 CLK_OFF.
   bool powered = (gdsc & 0x80000000U) != 0;
   // Hardware 2026-10-17: AXI running, AHB enabled but CLK_OFF (bit31). With bit1 (HW gating)
   // set the branch wakes on access, so enable bits, not CLK_OFF, gate the read-only probe.
   bool busClocks = !(axi & 0x80000000U) && (ahb & 0x1U) && (axi & 0x1U);
-  uint32_t cap = 0, ver = 0, hcs = 0, hce = 0, utrlba = 0, is = 0;
+  uint32_t cap = 0, ver = 0, ahit = 0, hcs = 0, hce = 0, utrlba = 0, utrlbau = 0, dbr = 0, rsr = 0, is = 0, cfg1 = 0;
   unsigned readHc = 0;
   if (powered && busClocks) {
     uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
     if (hc) {
       cap = read32 (hc, 0x00);
       ver = read32 (hc, 0x08);
+      ahit = read32 (hc, 0x18);
       is = read32 (hc, 0x20);
       hcs = read32 (hc, 0x30);
       hce = read32 (hc, 0x34);
       utrlba = read32 (hc, 0x50);
+      utrlbau = read32 (hc, 0x54);
+      dbr = read32 (hc, 0x58);
+      rsr = read32 (hc, 0x60);
+      cfg1 = read32 (hc, 0xdc);
       readHc = 1;
     }
   }
   panic ("NATIVE_UFS inspect\n"
-         "gdsc=%08x\n"
+         "gdsc=%08x aggre=%08x ice=%08x\n"
          "axi=%08x ahb=%08x unipro=%08x\n"
-         "txsym=%08x rxsym=%08x aux=%08x\n"
-         "hc_read=%u cap=%08x ver=%08x\n"
-         "is=%08x hcs=%08x hce=%08x utrlba=%08x",
-         gdsc, axi, ahb, unipro, txs, rxs, aux, readHc, cap, ver, is, hcs, hce, utrlba);
+         "tx0=%08x rx0=%08x rx1=%08x aux=%08x\n"
+         "hc_read=%u cap=%08x ver=%08x ahit=%08x cfg1=%08x\n"
+         "is=%08x hcs=%08x hce=%08x db=%08x rsr=%08x\n"
+         "utrlba=%08x utrlbau=%08x",
+         gdsc, aggre, ice, axi, ahb, unipro, txs, rxs, rx1, aux,
+         readHc, cap, ver, ahit, cfg1, is, hcs, hce, dbr, rsr, utrlba, utrlbau);
 }
 
 // Adopt the controller the firmware left running (native-ufs-probe=3) and issue
@@ -398,6 +456,8 @@ static void dpuEnable (uintptr_t smmu, uintptr_t cb, uint32_t bank, uint32_t old
 static uintptr_t gExtraSmmu, gExtraCb;
 static unsigned gExtraBank;
 
+static IOBufferMemoryDescriptor *gUfsIdentityPgTbl = nullptr;
+
 static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, uint32_t *report,
                               uint64_t dma, uint64_t bytes)
 {
@@ -405,9 +465,30 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
   if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
-  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });
+  uint32_t smmuSkip = 0, smmuSid = stream, smmuMask = 0, smmuMode = 0, smmuBankArg = 0xffffffffU, smmuVmid = 3;
+  PE_parse_boot_argn ("ufs-smmu-skip", &smmuSkip, sizeof (smmuSkip));
+  if (stream == 0xe0) {
+    PE_parse_boot_argn ("ufs-smmu-sid", &smmuSid, sizeof (smmuSid));
+    PE_parse_boot_argn ("ufs-smmu-mask", &smmuMask, sizeof (smmuMask));
+    PE_parse_boot_argn ("ufs-smmu-mode", &smmuMode, sizeof (smmuMode));
+    PE_parse_boot_argn ("ufs-smmu-bank", &smmuBankArg, sizeof (smmuBankArg));
+    PE_parse_boot_argn ("ufs-smmu-vmid", &smmuVmid, sizeof (smmuVmid));
+    stream = static_cast<uint16_t> (smmuSid & 0x7fffU);
+  }
   gRootDiagnostic.smmuId1 = read32 (smmu, 0x24);
   gRootDiagnostic.smmuId2 = read32 (smmu, 0x28);
+  if (smmuSkip) {
+    report[0] = 0; report[1] = 0; report[2] = 0;
+    return;
+  }
+  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });
+  if (smmuBankArg != 0xffffffffU && !plan.error) {
+    unsigned banks = read32 (smmu, 0x24) & 255;
+    if (smmuBankArg < banks) {
+      plan.bank = smmuBankArg;
+      plan.reuse = false;
+    }
+  }
   gRootDiagnostic.smmuSlot = plan.slot;
   if (plan.error) {
     gRootDiagnostic.stage = "SMMU planning";
@@ -418,12 +499,70 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
   }
   unsigned bank = plan.bank, index = plan.slot;
   uintptr_t cb = smmu + (plan.pages + bank) * 4096;
-  const char *failure = configureUfsSmmu (plan, stream,
-    [smmu](unsigned offset) { return read32 (smmu, offset); },
-    [smmu](unsigned offset, uint32_t value) {
-      write32 (smmu, offset, value);
+  const uint32_t smrVal = 0x80000000U | ((smmuMask & 0x7fffU) << 16) | (stream & 0x7fffU);
+  const char *failure = nullptr;
+  if (smmuMode == 0 && smmuMask == 0) {
+    failure = configureUfsSmmu (plan, stream,
+      [smmu](unsigned offset) { return read32 (smmu, offset); },
+      [smmu](unsigned offset, uint32_t value) {
+        write32 (smmu, offset, value);
+        __asm__ volatile ("dsb sy" ::: "memory");
+      });
+  } else if (smmuMode == 1) {
+    // Direct S2CR TYPE=BYPASS (0x10000), no context bank.
+    write32 (smmu, 0xc00 + 4 * index, 0x000100ffU);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    write32 (smmu, 0x800 + 4 * index, smrVal);
+    __asm__ volatile ("dsb sy" ::: "memory");
+  } else {
+    // Modes 0 (with mask), 2 (CBAR VMID), 3 (CB.SCTLR=0xe0), 4 (S2CR ISH+WB), 5 (Stage-1 1:1 1GiB identity table).
+    write32 (cb, 0x0, 0);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    write32 (smmu, 0x1800 + 4 * bank, 1); // CBA2R VA64=1
+    __asm__ volatile ("dsb sy" ::: "memory");
+    uint32_t cbarVal = (smmuMode == 2) ? (0x10000U | (smmuVmid & 0xffU)) : 0x10000U;
+    write32 (smmu, 0x1000 + 4 * bank, cbarVal);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    if (smmuMode == 3) {
+      write32 (cb, 0x0, 0x000000e0U); // CFRE|CFIE|HUPCF, translation off
       __asm__ volatile ("dsb sy" ::: "memory");
-    });
+    } else if (smmuMode == 5) {
+      // Stage-1 1:1 identity map of [0, 512 GiB) using 512 x 1 GiB blocks (T0SZ=25, 4 KiB granule).
+      if (!gUfsIdentityPgTbl) {
+        gUfsIdentityPgTbl = IOBufferMemoryDescriptor::inTaskWithOptions (
+          kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+          static_cast<IOOptionBits> (kIOMemoryMapperNone), 4096, 4096);
+      }
+      if (!gUfsIdentityPgTbl) {
+        panic ("NATIVE_UFS smmu: identity L1 alloc failed");
+      }
+      uint64_t *l1 = static_cast<uint64_t *> (gUfsIdentityPgTbl->getBytesNoCopy ());
+      const uint64_t l1Pa = gUfsIdentityPgTbl->getPhysicalSegment (0, nullptr, kIOMemoryMapperNone);
+      const uint64_t blockAttr = (1ULL << 10) | (3ULL << 8) | (1ULL << 6) | 1ULL; // AF | ISH | AP=RW | Block
+      for (uint64_t i = 0; i < 512; ++i) {
+        l1[i] = (i << 30) | blockAttr;
+      }
+      cacheCleanInvalidate (l1, 4096);
+      write32 (cb, 0x20, static_cast<uint32_t> (l1Pa));
+      write32 (cb, 0x24, static_cast<uint32_t> (l1Pa >> 32));
+      write32 (cb, 0x10, 5U | (7U << 15)); // TCR2: 48-bit PA, SEP=7
+      write32 (cb, 0x30, 25U | (1U << 23) | (1U << 8) | (1U << 10) | (3U << 12)); // T0SZ=25 (39b), EPD1=1, WB+ISH walks
+      write32 (cb, 0x38, 0xffU);           // MAIR attr0 = Normal WB-RWA
+      write32 (cb, 0x618, 0); write32 (cb, 0x7f0, 0); // TLBIALL + TLBSYNC
+      __asm__ volatile ("dsb sy" ::: "memory");
+      for (unsigned spin = 0; spin < 100000; ++spin) if (!(read32 (cb, 0x7f4) & 1)) break;
+      write32 (cb, 0x0, 1U | (1U << 5) | (1U << 6) | (1U << 7)); // M | CFRE | CFIE | HUPCF
+      __asm__ volatile ("dsb sy; isb" ::: "memory");
+    }
+    uint32_t s2crVal = bank;
+    if (smmuMode == 4) {
+      s2crVal |= (3U << 22) | (1U << 11) | (0xfU << 12); // SHCFG=ISH, MTCFG=1, MEMATTR=WB
+    }
+    write32 (smmu, 0xc00 + 4 * index, s2crVal);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    write32 (smmu, 0x800 + 4 * index, smrVal);
+    __asm__ volatile ("dsb sy" ::: "memory");
+  }
   uint32_t smr = read32 (smmu, 0x800 + 4 * index), s2cr = read32 (smmu, 0xc00 + 4 * index);
   uint32_t cbar = read32 (smmu, 0x1000 + 4 * bank), sctlr = read32 (cb, 0x0);
   gRootDiagnostic.smr = smr; gRootDiagnostic.s2cr = s2cr;
@@ -444,6 +583,8 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
 
 void NativeUfs::adoptAndRead (unsigned level)
 {
+  uint32_t aggreClk = 0, iceClk = 0;
+  ensureUfsClocks (&aggreClk, &iceClk);
   OSSharedPtr<IOMemoryMap> hcMap;
   uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
   if (!hc) {
@@ -488,6 +629,14 @@ void NativeUfs::adoptAndRead (unsigned level)
   while ((read32 (hc, 0x60) & 1) && stopLoops--) IODelay (10);
   if (read32 (hc, 0x60) & 1) panic ("NATIVE_UFS adopt: request list did not stop");
   smmuBypassStream (0xe0, smmuMap, smmuReport, phys, 16384);
+  uintptr_t smmuBase = smmuMap ? static_cast<uintptr_t> (smmuMap->getVirtualAddress ()) : 0;
+  uintptr_t smmuCb = 0;
+  if (smmuBase) {
+    uint32_t idr1 = read32 (smmuBase, 0x24);
+    unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
+    unsigned bank = smmuReport[0] >> 16;
+    if ((pages + bank) * 4096 < 0xd0000) smmuCb = smmuBase + (pages + bank) * 4096;
+  }
   write32 (hc, 0x50, static_cast<uint32_t> (phys));
   write32 (hc, 0x54, static_cast<uint32_t> (phys >> 32));
   write32 (hc, 0x20, 0xffffffffU);  // clear stale status
@@ -497,11 +646,28 @@ void NativeUfs::adoptAndRead (unsigned level)
   }
   if (level == 3) {
     panic ("NATIVE_UFS adopt: list replaced\n"
-           "phys=%llx hcs=%08x->%08x\n"
+           "phys=%llx hcs=%08x->%08x aggre=%08x ice=%08x\n"
+           "smr=%08x s2cr=%08x cbar=%08x sctlr=%08x\n"
            "is=%08x db=%08x rsr=%08x ba=%08x bau=%08x ie=%08x",
-           phys, hcsBefore, read32 (hc, 0x30), read32 (hc, 0x20), read32 (hc, 0x58),
-           read32 (hc, 0x60), read32 (hc, 0x50), read32 (hc, 0x54), read32 (hc, 0x24));
+           phys, hcsBefore, read32 (hc, 0x30), aggreClk, iceClk,
+           gRootDiagnostic.smr, gRootDiagnostic.s2cr, gRootDiagnostic.cbar, gRootDiagnostic.sctlr,
+           read32 (hc, 0x20), read32 (hc, 0x58), read32 (hc, 0x60),
+           read32 (hc, 0x50), read32 (hc, 0x54), read32 (hc, 0x24));
   }
+
+  uint32_t pollMs = 150;
+  PE_parse_boot_argn ("ufs-poll-ms", &pollMs, sizeof (pollMs));
+  auto waitDoorbell = [&] () -> bool {
+    uint64_t deadline = 0;
+    clock_interval_to_deadline (pollMs, kMillisecondScale, &deadline);
+    do {
+      if (!(read32 (hc, 0x58) & 1)) {
+        return true;
+      }
+      IODelay (10);
+    } while (mach_absolute_time () < deadline);
+    return false;
+  };
 
   auto command = [&] (uint8_t lun, const uint8_t *cdb, unsigned cdbLength, bool toHost, uint32_t length) -> UfsResult {
     uint8_t *utrd = virt;
@@ -519,32 +685,29 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     uint64_t ucdPhys = phys + ucdOffset;
     uint32_t direction = length ? (toHost ? 2U : 1U) : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U | (direction << 25);
-    *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;     // OCS: not completed
-    *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
-    *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
-    *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);   // response length | offset (dwords)
+    volatile uint32_t *utrdW = reinterpret_cast<volatile uint32_t *> (utrd);
+    utrdW[0] = 0x10000000U | (direction << 25);
+    utrdW[2] = 0x0fU;     // OCS: not completed
+    utrdW[4] = static_cast<uint32_t> (ucdPhys);
+    utrdW[5] = static_cast<uint32_t> (ucdPhys >> 32);
+    utrdW[6] = (512U >> 2) | ((rspOffset >> 2) << 16);   // response length | offset (dwords)
     uint32_t prdEntries = length ? 1U : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | ((prdtOffset >> 2) << 16);
+    utrdW[7] = prdEntries | ((prdtOffset >> 2) << 16);
     if (length) {
       uint64_t dataPhys = phys + dataOffset;
-      uint8_t *prd = ucd + prdtOffset;
-      *reinterpret_cast<uint32_t *> (prd + 0) = static_cast<uint32_t> (dataPhys);
-      *reinterpret_cast<uint32_t *> (prd + 4) = static_cast<uint32_t> (dataPhys >> 32);
-      *reinterpret_cast<uint32_t *> (prd + 12) = length - 1;
+      volatile uint32_t *prdW = reinterpret_cast<volatile uint32_t *> (ucd + prdtOffset);
+      prdW[0] = static_cast<uint32_t> (dataPhys);
+      prdW[1] = static_cast<uint32_t> (dataPhys >> 32);
+      prdW[2] = 0;
+      prdW[3] = length - 1;
     }
     cacheClean (virt, 16384);
     write32 (hc, 0x20, 0xffffffffU);
+    __asm__ volatile ("dsb sy" ::: "memory");
     write32 (hc, 0x58, 1);          // ring slot 0
+    __asm__ volatile ("dsb sy" ::: "memory");
     UfsResult result = { 0xf, 0xff, 0xff, 0, 0, 0 };
-    bool done = false;
-    for (unsigned loops = 0; loops < 100000; loops++) {
-      if (!(read32 (hc, 0x58) & 1)) {
-        done = true;
-        break;
-      }
-      IODelay (1);
-    }
+    bool done = waitDoorbell ();
     cacheCleanInvalidate (virt, 16384);
     if (!done) {
       return result;
@@ -579,23 +742,19 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     ucd[3] = 1;                     // task tag
     uint64_t ucdPhys = phys + ucdOffset;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U;
-    *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;
-    *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
-    *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
-    *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);
-    *reinterpret_cast<uint32_t *> (utrd + 28) = (prdtOffset >> 2) << 16;
+    volatile uint32_t *utrdW = reinterpret_cast<volatile uint32_t *> (utrd);
+    utrdW[0] = 0x10000000U;
+    utrdW[2] = 0x0fU;
+    utrdW[4] = static_cast<uint32_t> (ucdPhys);
+    utrdW[5] = static_cast<uint32_t> (ucdPhys >> 32);
+    utrdW[6] = (512U >> 2) | ((rspOffset >> 2) << 16);
+    utrdW[7] = (prdtOffset >> 2) << 16;
     cacheClean (virt, 16384);
     write32 (hc, 0x20, 0xffffffffU);
+    __asm__ volatile ("dsb sy" ::: "memory");
     write32 (hc, 0x58, 1);
-    bool done = false;
-    for (unsigned loops = 0; loops < 100000; loops++) {
-      if (!(read32 (hc, 0x58) & 1)) {
-        done = true;
-        break;
-      }
-      IODelay (1);
-    }
+    __asm__ volatile ("dsb sy" ::: "memory");
+    bool done = waitDoorbell ();
     cacheCleanInvalidate (virt, 16384);
     if (!done) {
       return 0xf;
@@ -605,6 +764,50 @@ void NativeUfs::adoptAndRead (unsigned level)
     *value = getBe32 (rsp + 20);
     return *reinterpret_cast<volatile uint32_t *> (utrd + 8) & 0xff;
   };
+  if (level == 4) {
+    uint32_t cmdKind = 3;
+    PE_parse_boot_argn ("ufs-cmd", &cmdKind, sizeof (cmdKind));
+    uint32_t ocs = 0xf, qval = 0, qresp = 0;
+    UfsResult t = { 0xf, 0xff, 0xff, 0, 0, 0 };
+    if (cmdKind == 0) {
+      ocs = query (0, 0, 0, &qval, &qresp);
+      t.ocs = ocs; t.response = qresp >> 8; t.scsi = qresp & 0xff;
+    } else if (cmdKind == 1) {
+      ocs = query (1, 0x03, 0x02, &qval, &qresp);
+      t.ocs = ocs; t.response = qresp >> 8; t.scsi = qresp & 0xff;
+    } else if (cmdKind == 2) {
+      uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+      t = command (0xd0, ssu, 6, false, 0);
+      qval = (t.ocs << 16) | (t.response << 8) | t.scsi;
+      if (t.ocs == 0) {
+        IODelay (50000);
+        uint8_t tur0[6] = { 0, 0, 0, 0, 0, 0 };
+        t = command (0, tur0, 6, false, 0);
+      }
+    } else {
+      uint8_t tur0[6] = { 0, 0, 0, 0, 0, 0 };
+      t = command (0, tur0, 6, false, 0);
+    }
+    const uint8_t *rsp0 = virt + ucdOffset + rspOffset;
+    uint32_t gfsr = smmuBase ? read32 (smmuBase, 0x48) : 0;
+    uint32_t gsyn0 = smmuBase ? read32 (smmuBase, 0x50) : 0;
+    uint32_t cbfsr = smmuCb ? read32 (smmuCb, 0x58) : 0;
+    uint32_t cbfsyn = smmuCb ? read32 (smmuCb, 0x68) : 0;
+    uint64_t cbfar = smmuCb ? (uint64_t (read32 (smmuCb, 0x60)) | (uint64_t (read32 (smmuCb, 0x64)) << 32)) : 0;
+    panic ("NATIVE_UFS probe4 cmd=%u ocs=%x resp=%02x scsi=%02x val=%08x\n"
+           "phys=%llx hcs=%08x->%08x aggre=%08x ice=%08x\n"
+           "is=%08x db=%08x rsr=%08x ahit=%08x\n"
+           "smmu smr=%08x s2cr=%08x cbar=%08x sctlr=%08x\n"
+           "fault gfsr=%08x gsyn=%08x fsr=%08x fsyn=%08x far=%llx\n"
+           "uic=%08x %08x %08x %08x %08x rsp=%08x %08x",
+           cmdKind, t.ocs, t.response, t.scsi, qval,
+           phys, hcsBefore, read32 (hc, 0x30), aggreClk, iceClk,
+           read32 (hc, 0x20), read32 (hc, 0x58), read32 (hc, 0x60), read32 (hc, 0x18),
+           gRootDiagnostic.smr, gRootDiagnostic.s2cr, gRootDiagnostic.cbar, gRootDiagnostic.sctlr,
+           gfsr, gsyn0, cbfsr, cbfsyn, cbfar,
+           read32 (hc, 0x38), read32 (hc, 0x3c), read32 (hc, 0x40), read32 (hc, 0x44), read32 (hc, 0x48),
+           getBe32 (rsp0), getBe32 (rsp0 + 4));
+  }
   // Device state before waking it. Hardware 2026-10-17: NOP OUT answers, fDeviceInit = 0 (done),
   // bCurrentPowerMode = 0x33 (UFS-PowerDown) and every LU returns NOT READY. Linux resumes the
   // device with START STOP UNIT (power condition ACTIVE) to the UFS Device well-known LU 0xD0
@@ -621,18 +824,6 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     query (1, 0x03, 0x02, &powerAfter, &queryResp);
     (void) ignoredValue;
-  }
-  if (level == 4) {
-    uint8_t tur0[6] = { 0, 0, 0, 0, 0, 0 };
-    UfsResult t = command (0, tur0, 6, false, 0);
-    const uint8_t *rsp0 = virt + ucdOffset + rspOffset;
-    panic ("NATIVE_UFS adopt: TEST UNIT READY lun0\n"
-           "ocs=%x resp=%02x scsi=%02x\n"
-           "phys=%llx hcs=%08x->%08x smmu idx/bank=%08x cbar=%08x\n"
-           "is=%08x db=%08x rsr=%08x\n"
-           "rsp=%08x %08x",
-           t.ocs, t.response, t.scsi, phys, hcsBefore, read32 (hc, 0x30), smmuReport[0], smmuReport[1],
-           read32 (hc, 0x20), read32 (hc, 0x58), read32 (hc, 0x60), getBe32 (rsp0), getBe32 (rsp0 + 4));
   }
   uint32_t hcsAfter = 0;
   const unsigned maxLun = 6;
@@ -836,38 +1027,60 @@ void NativeUfs::dumpFirmwareList (void)
 void NativeUfs::inspectSmmu (void)
 {
   OSSharedPtr<IOMemoryMap> map;
-  uintptr_t smmu = mapPhys (0x15000000ULL, 0x1000, map);
+  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, map);
   if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
-  uint32_t scr0 = read32 (smmu, 0x00), idr0 = read32 (smmu, 0x20), idr1 = read32 (smmu, 0x24);
-  uint32_t gfsr = read32 (smmu, 0x48);
+  uint32_t scr0 = read32 (smmu, 0x00), idr0 = read32 (smmu, 0x20), idr1 = read32 (smmu, 0x24), idr2 = read32 (smmu, 0x28);
+  uint32_t gfsr = read32 (smmu, 0x48), gsyn0 = read32 (smmu, 0x50), gsyn1 = read32 (smmu, 0x54);
   unsigned count = idr0 & 0xff;
-  if (count > 128) {
-    count = 128;
-  }
+  if (count > 128) count = 128;
+  unsigned banks = idr1 & 0xff;
+  unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
   unsigned match = 0xffff, valid = 0, typeCount[4] = { 0, 0, 0, 0 };
   uint32_t matchSmr = 0, matchS2cr = 0;
+  static char text[1200];
+  int used = snprintf (text, sizeof (text),
+                       "NATIVE_UFS smmu\n"
+                       "scr0=%08x idr0=%08x idr1=%08x idr2=%08x\n"
+                       "gfsr=%08x gsyn0=%08x gsyn1=%08x\n",
+                       scr0, idr0, idr1, idr2, gfsr, gsyn0, gsyn1);
+  unsigned dumped = 0;
   for (unsigned index = 0; index < count; index++) {
     uint32_t smr = read32 (smmu, 0x800 + 4 * index);
     uint32_t s2cr = read32 (smmu, 0xc00 + 4 * index);
     if (smr & 0x80000000U) {
       valid++;
-      typeCount[(s2cr >> 16) & 3]++;
+      unsigned stype = (s2cr >> 16) & 3;
+      typeCount[stype]++;
       uint32_t mask = (smr >> 16) & 0x7fff;
       if (match == 0xffff && (((smr ^ 0xe0U) & 0x7fffU) & ~mask) == 0) {
         match = index;
         matchSmr = smr;
         matchS2cr = s2cr;
       }
+      if (dumped < 4 && used < int (sizeof (text)) - 160) {
+        unsigned b = s2cr & 0xff;
+        uint32_t cbar = 0, cba2r = 0, sctlr = 0, ttbr0 = 0, fsr = 0;
+        if (stype == 0 && b < banks && (pages + banks) * 4096 <= 0xd0000) {
+          uintptr_t cb = smmu + (pages + b) * 4096;
+          cbar = read32 (smmu, 0x1000 + 4 * b);
+          cba2r = read32 (smmu, 0x1800 + 4 * b);
+          sctlr = read32 (cb, 0x0);
+          ttbr0 = read32 (cb, 0x20);
+          fsr = read32 (cb, 0x58);
+        }
+        used += snprintf (text + used, sizeof (text) - used,
+                          "v%u[%u] smr=%08x s2cr=%08x cb=%u cbar=%08x cba2r=%08x sctlr=%08x ttbr0=%08x fsr=%08x\n",
+                          dumped, index, smr, s2cr, b, cbar, cba2r, sctlr, ttbr0, fsr);
+        dumped++;
+      }
     }
   }
-  panic ("NATIVE_UFS smmu\n"
-         "scr0=%08x idr0=%08x idr1=%08x gfsr=%08x\n"
-         "nsmr=%u valid=%u types t0=%u t1=%u t2=%u\n"
-         "sid0xe0 match=%x smr=%08x s2cr=%08x",
-         scr0, idr0, idr1, gfsr, count, valid, typeCount[0], typeCount[1], typeCount[2],
-         match, matchSmr, matchS2cr);
+  snprintf (text + used, sizeof (text) - used,
+            "nsmr=%u valid=%u t0=%u t1=%u t2=%u sid0xe0=%x smr=%08x s2cr=%08x",
+            count, valid, typeCount[0], typeCount[1], typeCount[2], match, matchSmr, matchS2cr);
+  panic ("%s", text);
 }
 
 // Read-only context-bank survey (native-ufs-probe=8): CBAR/CBA2R in gr1 and SCTLR/TTBR0 in the
@@ -1227,6 +1440,7 @@ static bool hostBringUp (const char **why)
     return true;
   }
   gRootDiagnostic.stage = "controller map";
+  ensureUfsClocks ();
   gHost.hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, gHost.hcMap);
   if (!gHost.hc) {
     *why = "controller map";
@@ -1426,7 +1640,9 @@ static bool hostBringUp (const char **why)
     }
     gDmaLimit = limit;
   }
-  hostSlotsUpgrade (regionSlots, entries, wide);
+  uint32_t noUpgrade = 0;
+  PE_parse_boot_argn ("ufs-no-upgrade", &noUpgrade, sizeof (noUpgrade));
+  if (!noUpgrade) hostSlotsUpgrade (regionSlots, entries, wide);
   if (!hostStartQueue (why)) return false;
   gRootDiagnostic.stage = "NOP OUT";
   // NOP OUT proves the transport before touching the SCSI layer.

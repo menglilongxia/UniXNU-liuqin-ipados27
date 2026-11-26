@@ -151,6 +151,7 @@ kernel_args = [
   "buttons=1",
   "backlight=1",
   "cpufreq=4",
+  "smp=1",
   "armcpu-idle-latency-us=100000",
   "data-persist=2",
   "sheng-data-persist=2",

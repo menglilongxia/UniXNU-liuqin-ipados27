@@ -390,6 +390,8 @@ extern "C" __attribute__((weak, visibility("hidden"))) uint32_t native_gpu_trace
 extern "C" __attribute__((weak, visibility("hidden"))) int boot_kthread_report_nth(const char *, unsigned, char *, unsigned, char *, unsigned) {return -1;}
 extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_adreno_method_stats[20][4] = {};
 extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_keyboard_lid_closed = 0;
+extern "C" __attribute__((weak, visibility("hidden"))) bool sm8550_apps_smmu_lock(void) {return true;}
+extern "C" __attribute__((weak, visibility("hidden"))) void sm8550_apps_smmu_unlock(void) {}
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 # The keystore state service (AppleKeyStoreState) and its probe, unchanged from iPadOS 17.

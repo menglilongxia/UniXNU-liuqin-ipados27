@@ -388,6 +388,8 @@ extern "C" __attribute__((weak, visibility("hidden"))) int native_gpu_trace_enab
 extern "C" __attribute__((weak, visibility("hidden"))) void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
 extern "C" __attribute__((weak, visibility("hidden"))) uint32_t native_gpu_trace_snapshot(void *, uint32_t) {return 0;}
 extern "C" __attribute__((weak, visibility("hidden"))) int boot_kthread_report_nth(const char *, unsigned, char *, unsigned, char *, unsigned) {return -1;}
+extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_adreno_method_stats[20][4] = {};
+extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_keyboard_lid_closed = 0;
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 # The keystore state service (AppleKeyStoreState) and its probe, unchanged from iPadOS 17.
@@ -404,12 +406,132 @@ gop_late = gop / 'NativeGOPPresenter.late.o'
 run([llvm / 'llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeGOPPresenter.cpp',
      gop / 'NativeGOPPresenter.o', gop_late])
 
-# Archive owned GOP framebuffer + AppleKeyStoreState objects (no SM8550-only drivers).
+# Stage 4A input, backlight and CPUFreq drivers for Xiaomi Pad 6 Pro (liuqin, SM8475).
+DEVICE = Path(os.environ.get('UNIXNU_DEVICE') or (ROOT / 'kits/sheng').resolve().parent)
+csot_fw = DEVICE / 'firmware/novatek/novatek_nt36532_m81_fw_csot.bin'
+tm_fw = DEVICE / 'firmware/novatek/novatek_nt36532_m81_fw_tm.bin'
+require(csot_fw.is_file(), f'{csot_fw}: missing NT36532 CSOT touch firmware')
+require(tm_fw.is_file(), f'{tm_fw}: missing NT36532 TM touch firmware')
+print(run(['python3', ROOT / 'scripts/build-sheng-source-drivers.py', '--tree', ROOT, '--device', DEVICE,
+           '--touch-firmware', csot_fw], text=True), end='')
+SRC = ROOT / 'build/sheng-source-drivers'
+hid_abi_path = Path(__file__).resolve().with_name(f'hid-device-{BUILD}.json')
+hid_abi = json.loads(hid_abi_path.read_text())
+hid_slots = [(int(t, 16), int(d, 16)) for t, d in hid_abi['slots']]
+hid_pure = {i for i, (t, _) in enumerate(hid_slots) if t == PURE_TARGET}
+
+
+def object_symbols(data):
+    commands = macho(data)['commands']
+    st = next(p for c, p, _ in commands if c == 2)
+    sy, count, strings, _ = struct.unpack_from('<4I', data, st + 8)
+    found = []
+    for i in range(count):
+        ix, kind, _, _, va = struct.unpack_from('<IBBHQ', data, sy + i * 16)
+        found.append((data[strings + ix:data.index(b'\0', strings + ix)].decode(), va, kind))
+    return found
+
+
+def object_vtable(data, found, name, count):
+    """[(symbol, signed word)] of the first count entries of vtable name (authenticated pointer relocations)."""
+    va = next(v for n, v, _ in found if n == name)
+    entries = {}
+    for segment in macho(data)['segments']:
+        for sec in segment['sections']:
+            if sec['va'] <= va < sec['va'] + sec['size']:
+                ro, rc = struct.unpack_from('<2I', data, sec['command_offset'] + 56)
+                for i in range(rc):
+                    offset, bits = struct.unpack_from('<2I', data, ro + i * 8)
+                    if bits >> 27 & 1 and bits >> 25 & 3 == 3 and bits >> 28 == 11:
+                        entries[sec['va'] + offset] = (found[bits & 0xffffff][0],
+                                                       struct.unpack_from('<Q', data, sec['fileoff'] + offset)[0])
+    return [entries.get(va + 16 + i * 8) for i in range(count)]
+
+
+hid_bindings = {n: int(v, 16) + slide for n, v in hid_abi['bindings'].items()}
+by_diversity = {}
+for i, (_, d) in enumerate(hid_slots):
+    by_diversity.setdefault(d, []).append(i)
+hid_vtables = []
+slot_of = {}
+hid_raw = (SRC / 'NativeHidInput.o').read_bytes()
+hid_found = object_symbols(hid_raw)
+vtables = [n for n, _, k in hid_found if n.startswith('__ZTV') and k != 1 and '9MetaClassE' not in n]
+for vt_name in vtables:
+    for i, entry in enumerate(object_vtable(hid_raw, hid_found, vt_name, len(hid_slots))):
+        if entry and '11IOHIDDevice' in entry[0]:
+            require(slot_of.setdefault(entry[0], i) == i, f'{entry[0]}: one slot in every owned vtable')
+for name in sorted({n for n, _, k in hid_found if k == 1 and ('11IOHIDDevice' in n)} - set(hid_bindings)):
+    if name in slot_of:
+        slot = slot_of[name]
+    else:
+        matches = by_diversity.get(discriminator(name[1:]), [])
+        require(len(matches) == 1, f'{name}: one original IOHIDDevice slot with its discriminator')
+        slot = matches[0]
+    require(slot not in hid_pure, f'{name}: not an abstract original slot')
+    hid_bindings[name] = hid_slots[slot][0] + slide
+for vt_name in vtables:
+    entries = object_vtable(hid_raw, hid_found, vt_name, len(hid_slots))
+    require(all(entries), f'{vt_name}: at least the {len(hid_slots)} IOHIDDevice entries')
+    for i, (name, word) in enumerate(entries):
+        require(word >> 63 and word >> 48 & 1 and word >> 49 & 3 == 0 and (word >> 32) & 0xffff == hid_slots[i][1],
+                f'{vt_name} slot {i} ({name}) signed with the original diversity {hid_slots[i][1]:#x}')
+        if '11IOHIDDevice' in name:
+            require(hid_bindings.get(name) == hid_slots[i][0] + slide, f'{vt_name} slot {i} ({name}) is the original entry')
+hid_vtables += vtables
+HID_DATA = {'__ZN11IOHIDDevice10gMetaClassE', '__ZTV11IOHIDDevice'}
+hid_text, hid_addresses = '.text\n.p2align 2\n', ''
+for name, va in sorted(hid_bindings.items()):
+    if name in HID_DATA:
+        hid_addresses += f'.globl {name}\n.set {name}, {va:#x}\n'
+    else:
+        hid_addresses += f'.globl {name}.original\n.set {name}.original, {va:#x}\n'
+        hid_text += f'.globl {name}\n{name}:\n bti c\n b {name}.original\n'
+(OUT / 'hid-bindings.S').write_text(hid_text)
+(OUT / 'hid-addresses.S').write_text(hid_addresses)
+for stem in ('hid-bindings', 'hid-addresses'):
+    run(['xcrun', 'clang', '-target', TRIPLE, '-isysroot', sdk, '-c', OUT / (stem + '.S'), '-o', OUT / (stem + '.o')])
+hid_late = OUT / 'NativeHidInput.late.o'
+run([llvm / 'llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeHidInput.cpp',
+     SRC / 'NativeHidInput.o', hid_late])
+hid_probe = ROOT / 'kits/sheng/HidInputProbe.cpp'
+compile_cpp(hid_probe, OUT / 'HidInputProbe.o')
+input_objects = [hid_late, OUT / 'hid-bindings.o', OUT / 'hid-addresses.o', OUT / 'HidInputProbe.o'] + \
+    [SRC / (stem + '.o') for stem in ('TouchProbe', 'ButtonProbe', 'GeniSpi', 'NvtProtocol', 'NvtTouchCore', 'NvtFirmware')]
+print(f'HID: {len(hid_bindings)} original IOHIDDevice bindings, vtables {hid_vtables} match the original diversities')
+
+# Board drivers: SM8475 EPSS CPUFreq, single-KTZ8866 Backlight (+ GeniI2c), and TM panel touch firmware fallback.
+board_dir = OUT / 'board'
+board_dir.mkdir(exist_ok=True)
+KITS = ROOT / 'kits/sheng'
+board_objects = []
+for stem in ('CpuFreqProbe', 'BacklightProbe'):
+    compile_cpp(KITS / (stem + '.cpp'), board_dir / (stem + '.o'))
+    board_objects.append(board_dir / (stem + '.o'))
+compile_cpp(KITS / 'AppleARMBacklight.cpp', board_dir / 'AppleARMBacklight.o')
+run([llvm / 'llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_AppleARMBacklight.cpp',
+     board_dir / 'AppleARMBacklight.o', board_dir / 'AppleARMBacklight.late.o'])
+board_objects.append(board_dir / 'AppleARMBacklight.late.o')
+compile_c(KITS / 'GeniI2c.c', board_dir / 'GeniI2c.o')
+board_objects.append(board_dir / 'GeniI2c.o')
+tm_bytes = tm_fw.read_bytes()
+(board_dir / 'NvtFirmwareTm.c').write_text(
+    '/* Generated vendor TM touch firmware; build output only. */\n#include <stdint.h>\n'
+    f'const uint32_t native_touch_firmware_tm_size = {len(tm_bytes)};\n'
+    f'const uint8_t native_touch_firmware_tm[{len(tm_bytes)}] = {{' +
+    ','.join(str(b) for b in tm_bytes) + '};\n'
+)
+compile_c(board_dir / 'NvtFirmwareTm.c', board_dir / 'NvtFirmwareTm.o')
+board_objects.append(board_dir / 'NvtFirmwareTm.o')
+input_objects += board_objects
+print(f'Board drivers (liuqin): {len(board_objects)} objects (CpuFreq, Backlight, GeniI2c, NvtFirmwareTm)')
+
+# Archive owned GOP framebuffer + AppleKeyStoreState + Stage 4A input/backlight/cpufreq objects.
 archive = OUT / 'libNativeLegacyDisplay.late.a'
 archive.unlink(missing_ok=True)
 run(['xcrun', 'ar', 'rcs', archive, late, OUT / 'original-bindings.o', OUT / 'original-addresses.o',
      OUT / 'LegacyDisplayProbe.o', OUT / 'LegacyDisplaySupport27.o', gop_late,
-     OUT / 'KeyStoreProbe.o', keyevents_late])
+     OUT / 'KeyStoreProbe.o', keyevents_late, *input_objects])
 sources = [
     ROOT / 'drivers/GopFramebuffer/NativeLegacyDisplay.cpp',
     ROOT / 'drivers/GopFramebuffer/NativeLegacyRequest.h',
@@ -420,6 +542,15 @@ sources = [
     ROOT / 'scripts' / ABI_PATH.name,
     keystore_source,
     ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
+    hid_abi_path,
+    hid_probe,
+    KITS / 'CpuFreqProbe.cpp',
+    KITS / 'BacklightProbe.cpp',
+    KITS / 'AppleARMBacklight.cpp',
+    KITS / 'GeniI2c.c',
+    KITS / 'GeniI2c.h',
+    csot_fw,
+    tm_fw,
 ]
 
 

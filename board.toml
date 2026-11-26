@@ -21,13 +21,14 @@ lba_bytes = 4096
 
 [components]
 # Official UniXNU Format 2 components matching UniXNU-sheng (iPadOS 27 arm64e),
-# omitting SM8550-specific Adreno740 until an Adreno 730 provider is implemented.
+# adding QcomGeniSpi for NT36532 touch and omitting SM8550-specific Adreno740.
 include = [
   "ArmDTPlatform",
   "ArmCpu",
   "XnuPrelink",
   "DarwinBoot",
   "ShengUfs",
+  "QcomGeniSpi",
   "RamBlock",
   "GopFramebuffer",
   "AppleKeyStoreState",
@@ -123,7 +124,6 @@ skip_setup_tool = "scripts/seed-data-skip-setup.py"
 panic_screen = true
 kernel_args = [
   "-v",
-  "vc-text=1",
   "serial=3",
   "debug=0x14e",
   "kt_fixed_zones=120",
@@ -144,6 +144,13 @@ kernel_args = [
   "offline-key-events=1",
   "aks=1",
   "aks-sls=3",
+  "offline-hid-input=1",
+  "offline-hid-home=1",
+  "touch=4",
+  "touch-hid=1",
+  "buttons=1",
+  "backlight=1",
+  "cpufreq=4",
   "armcpu-idle-latency-us=100000",
   "data-persist=2",
   "sheng-data-persist=2",

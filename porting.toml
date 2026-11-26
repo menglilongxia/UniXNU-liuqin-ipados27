@@ -199,9 +199,9 @@ evidence = []
 
 [[area]]
 id = "input"
-status = "planned"
-components = []
-paths = ["drivers/ShengNovatekTouch", "package/*Touch*", "package/*Input*"]
+status = "implemented"
+components = ["QcomGeniSpi"]
+paths = ["drivers/ShengNovatekTouch", "drivers/ShengHidInput", "firmware/novatek/**", "package/*Touch*", "package/*Input*", "package/*Button*"]
 inputs = [
   "Novatek NT36532 flashless TDDI touch on QUP0 SE4 (spi@990000, CS0, IRQ GPIO21, no reset line)",
   "PMIC PON power/vol-down and PM8350 GPIO6 vol-up buttons",

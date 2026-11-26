@@ -23,3 +23,8 @@ void boot_log_tick(unsigned now)
 {
     (void) now;
 }
+
+void boot_log_checkpoint(const char *tag)
+{
+    (void) tag;
+}

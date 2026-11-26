@@ -1,5 +1,11 @@
 # Board-specific XNU 12377 patches (applied after arch, soc, and os series).
 # SoC-wide SM8475 patches (SMP Affinity1, Gunyah physical timer) live in UniXNU-sm8475-common.
+# Includes core iPadOS 27 4K-page, SourceStorage, IOUserClient2022, and dyld pager fixes.
 linux-clang-ptrauth-auth-null.patch
-stack-shift.patch
+zzye-sheng-cpu-idle.patch
+zzyf-sheng-amp.patch
+zzyd-sheng-audio-addon-mount.patch
+source-storage-runtime.patch
+zzzz-sheng-ipados27-bringup.patch
+vmwait-dyld-pager-source-release.patch
 verbose-text-console.patch

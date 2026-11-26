@@ -144,9 +144,7 @@ kernel_args = [
   "offline-key-events=1",
   "aks=1",
   "aks-sls=3",
-  "smp=1",
-  "armcpu-spi-ipi=1",
-  "armcpu-self-ipi=1",
+  "armcpu-idle-latency-us=100000",
   "data-persist=2",
   "sheng-data-persist=2",
   "amfi_get_out_of_my_way=1",
@@ -179,6 +177,11 @@ vmm-present = 1
 [adt.chosen.u32]
 # SM8475 has no Apple CTRR hardware.
 kernel-ctrr-to-be-enabled = 0
+
+[adt.chosen.bytes]
+# Development-only 48-byte boot-manifest identity (matches UniXNU-cupid bring-up)
+# so native_owner_publish_boot_manifest_seeded() accepts unverified SHNGROOT windows.
+"boot-manifest-hash" = "474b0ce444b41c5380e498960cc30c45f5abd2206808b3ba378278854a0ab90d80c1976832df570c55b8401b9bce093e"
 
 [adt.buttons.string]
 compatible = "buttons"

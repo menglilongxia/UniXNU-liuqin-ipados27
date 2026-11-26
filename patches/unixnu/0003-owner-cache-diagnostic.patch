@@ -1,0 +1,29 @@
+--- a/patches/xnu-12377/offline-owner-systemos-mount.patch
++++ b/patches/xnu-12377/offline-owner-systemos-mount.patch
+@@ -18,7 +18,7 @@
+ +extern void commpage_update_dyld_flags(uint64_t);
+ +volatile uint64_t native_owner_cache_dyld_flags = 0;
+ +#endif
+-+extern int native_verified_block_root_authorized(dev_t);
+++extern int native_verified_block_root_authorized(dev_t); extern const char *native_owner_cache_diagnostic(void);
+ +volatile int native_owner_cache_stage = 0;
+ +volatile int native_owner_cache_status = -1;
+ +volatile int native_owner_cache_mount_status = -1;
+@@ -87,7 +87,7 @@
+ +	request.flags |= MNT_UNION;
+ +#endif
+ +	if (device_vnode) vnode_put(device_vnode);
+-+	root_authorized = (vfs_flags(root_mount) & MNT_RDONLY) && root_device != NODEV &&
+++	root_authorized = /* unverified bring-up: no MNT_RDONLY gate */ root_device != NODEV &&
+ +	    native_verified_block_root_authorized(root_device);
+ +	if (!root_authorized) goto done;
+ +	native_owner_cache_stage = 1;
+@@ -276,7 +276,7 @@
+ +	user_addr_t init_envp = USER_ADDR_NULL;
+ +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
+ +	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
+-+	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);
+++	if (cache_error) panic("%s", native_owner_cache_diagnostic());
+ +#endif
+ +#if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+ +	int data_error = native_owner_data_prepare(p, (user_addr_t)scratch_addr);

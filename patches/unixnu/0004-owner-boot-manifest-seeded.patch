@@ -1,0 +1,20 @@
+--- a/patches/xnu-12377/offline-owner-systemos-mount.patch
++++ b/patches/xnu-12377/offline-owner-systemos-mount.patch
+@@ -12,7 +12,7 @@
+ +#endif
+ +extern int native_verified_block_volume_device(const char *, dev_t *, char *, size_t);
+ +#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+-+extern int native_owner_publish_boot_manifest(dev_t, const char *, dev_t, const char *);
+++extern int native_owner_publish_boot_manifest(dev_t, const char *, dev_t, const char *); extern int native_owner_publish_boot_manifest_seeded(dev_t, const char *, dev_t, const char *);
+ +#endif
+ +#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP
+ +extern void commpage_update_dyld_flags(uint64_t);
+@@ -150,7 +150,7 @@
+ +	if (!root_recheck) error = EAUTH;
+ +#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+ +	if (!error && cache_authorized && root_recheck &&
+-+	    !native_owner_publish_boot_manifest(root_device, XNU_OWNER_ROOT_VOLUME_UUID,
+++	    !native_owner_publish_boot_manifest_seeded(root_device, XNU_OWNER_ROOT_VOLUME_UUID,
+ +	        selected, volume)) error = EAUTH;
+ +#endif
+ +#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP

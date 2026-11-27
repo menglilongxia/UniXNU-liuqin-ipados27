@@ -31,6 +31,76 @@ if 'IrqBitTsbWrite | IrqBitFuse;' in irq_src:
     irq_cpp.write_text(irq_src.replace('IrqBitTsbWrite | IrqBitFuse;', 'IrqBitTsbWrite;', 1))
     print('Patched NativeAdrenoIrq.cpp kEnable for SM8475 Adreno 730 (dropped bit 29 IrqBitFuse)')
 
+# SM8475 Adreno 730 routes 4 streams (gfx3d_user 0/0x400 + gfx3d_lpac 1/0x401) to bank 0.
+# Extend NativeAdrenoGpuContext with a multi-stream bringUpStreams() / C entry point so
+# ArmSmmu4KObserveStreams tracks all 4 routes while keeping 48-bit per-process VMs intact.
+ctx_h = ROOT / 'drivers/Adreno740/NativeAdrenoGpuContext.h'
+ctx_h_src = ctx_h.read_text()
+if 'NativeAdrenoGpuContextBringupStreams' not in ctx_h_src:
+    h_anchor = '    IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],\n        const uint16_t sids[2],void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);'
+    h_ext = h_anchor + '\n    IOReturn bringUpStreams(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned *slots,\n        const uint16_t *sids,unsigned stream_count,void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);'
+    c_anchor = 'extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,\n    unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),\n    NativeAdrenoGmuContextReport *report);'
+    c_ext = c_anchor + '\nextern "C" IOReturn NativeAdrenoGpuContextBringupStreams(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,\n    const unsigned *slots,const uint16_t *sids,unsigned stream_count,void (*progress)(uint32_t),\n    NativeAdrenoGmuContextReport *report);'
+    if h_anchor not in ctx_h_src or c_anchor not in ctx_h_src:
+        sys.exit('NativeAdrenoGpuContext.h anchor not found for multi-stream bringup patch')
+    ctx_h.write_text(ctx_h_src.replace(h_anchor, h_ext, 1).replace(c_anchor, c_ext, 1))
+    print('Patched NativeAdrenoGpuContext.h with NativeAdrenoGpuContextBringupStreams')
+
+ctx_cpp = ROOT / 'drivers/Adreno740/NativeAdrenoGpuContext.cpp'
+ctx_cpp_src = ctx_cpp.read_text()
+if 'NativeAdrenoGpuContextBringupStreams' not in ctx_cpp_src:
+    cpp_sig = '''IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
+    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+{
+    if(!report)return kIOReturnBadArgument;
+    *report={};
+    if(used_)return kIOReturnBusy;
+    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
+        slots[0]==slots[1])return kIOReturnBadArgument;'''
+    cpp_sig_new = '''IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
+    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+{
+    return bringUpStreams(io,bank,asid,slots,sids,2,progress,report);
+}
+IOReturn NativeAdrenoGpuContext::bringUpStreams(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned *slots,
+    const uint16_t *sids,unsigned stream_count,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+{
+    if(!report)return kIOReturnBadArgument;
+    *report={};
+    if(used_)return kIOReturnBusy;
+    if(!io || !slots || !sids || !stream_count || stream_count>8 || bank>63 || !asid || asid>0xffff)return kIOReturnBadArgument;
+    for(unsigned i=0;i<stream_count;++i) {
+        if(slots[i]>127)return kIOReturnBadArgument;
+        for(unsigned j=0;j<i;++j)if(slots[i]==slots[j])return kIOReturnBadArgument;
+    }'''
+    cpp_att = '''        const ArmSmmu4KStream routes[2]={{slots[0],sids[0]},{slots[1],sids[1]}};
+        status=smmu_.attach(routes,2);'''
+    cpp_att_new = '''        ArmSmmu4KStream routes[8]={};
+        for(unsigned i=0;i<stream_count;++i)routes[i]={slots[i],sids[i]};
+        status=smmu_.attach(routes,stream_count);'''
+    cpp_c_anchor = '''    return board_gpu_context->bringUp(&io,bank,asid,slots,sids,progress,report);
+}'''
+    cpp_c_new = cpp_c_anchor + '''
+extern "C" IOReturn NativeAdrenoGpuContextBringupStreams(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,
+    const unsigned *slots,const uint16_t *sids,unsigned stream_count,void (*progress)(uint32_t),
+    NativeAdrenoGmuContextReport *report)
+{
+    static ArmSmmu4KIo board_io;
+    if(!report || board_gpu_context || !io || !slots || !sids || !stream_count || stream_count>8)return kIOReturnBadArgument;
+    board_io=*io;
+    board_gpu_context=new NativeAdrenoGpuContext;
+    if(!board_gpu_context)return kIOReturnNoMemory;
+    return board_gpu_context->bringUpStreams(&board_io,bank,asid,slots,sids,stream_count,progress,report);
+}'''
+    if cpp_sig not in ctx_cpp_src or cpp_att not in ctx_cpp_src or cpp_c_anchor not in ctx_cpp_src:
+        sys.exit('NativeAdrenoGpuContext.cpp anchor not found for multi-stream bringup patch')
+    ctx_cpp.write_text(
+        ctx_cpp_src.replace(cpp_sig, cpp_sig_new, 1)
+                   .replace(cpp_att, cpp_att_new, 1)
+                   .replace(cpp_c_anchor, cpp_c_new, 1)
+    )
+    print('Patched NativeAdrenoGpuContext.cpp with bringUpStreams() (up to 8 SMMU streams)')
+
 # SM8550-only and staged files excluded from the generic NativeAdreno set.
 EXCLUDED_ADRENO740 = {
     'NativeAdrenoAccelerator.cpp',
@@ -154,6 +224,7 @@ defined = subprocess.run(['xcrun', 'nm', '-g', archive], capture_output=True, te
 required = (
     '_liuqin_adreno_start_optional',
     '_native_adreno_publish',
+    '_NativeAdrenoGpuContextBringupStreams',
     '_native_adreno_fences_detail',
     '_ArmSmmu4KAttachStreams',
     '_AdrenoPM4Type7',

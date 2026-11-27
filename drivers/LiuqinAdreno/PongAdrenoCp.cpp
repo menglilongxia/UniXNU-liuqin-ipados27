@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: MIT */
-/* SM8475 Adreno 730 CP, ZAP (PAS 13), QSMMU V500 context, and SPI 300 IRQ
- * bring-up wired to UniXNU's upstream NativeAdreno runtime. */
+/* SM8475 Adreno 730 CP, ZAP (PAS 13), QSMMU V500 48-bit per-process context,
+ * CP SMMU aperture, and SPI 300 IRQ bring-up wired to UniXNU's NativeAdreno. */
 #include "PongAdrenoCp.h"
 #include "PongAdrenoCpProfile.h"
 #include "PongAdrenoZap.h"
-#include "NativeAdrenoSmmuContext.h"
+#include "NativeAdrenoGpuContext.h"
 #include "NativeAdrenoCpInit.h"
 #include "NativeAdrenoIrq.h"
 #include "NativeAdrenoPwrup.h"
 #include "AdrenoPM4.h"
+#include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -23,27 +24,28 @@
 extern "C" const uint8_t PongAdrenoSqeFirmware[], PongAdrenoZapMdt[], PongAdrenoZapCode[], PongAdrenoZapSignature[];
 extern "C" const size_t PongAdrenoSqeFirmwareBytes, PongAdrenoZapMdtBytes, PongAdrenoZapCodeBytes, PongAdrenoZapSignatureBytes;
 extern "C" volatile uint32_t native_adreno_wc_enabled;
+extern "C" volatile uint32_t native_adreno_cp_aperture[4];
 extern "C" uint64_t (*native_adreno_vm_now_us)(void);
 extern "C" void native_adreno_gpu_interrupt(uint32_t status);
 extern "C" IOReturn armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 extern "C" int get_preemption_level(void);
 
 namespace {
-constexpr uint64_t iovas[] = {0x100000, 0x200000, 0x300000, 0x301000, 0x302000};
-constexpr size_t sizes[] = {0x13000, 0x8000, 0x1000, 0x1000, 0x1000};
 /* SM8475 DT gfx3d_user: SID 0 / mask 0x400; gfx3d_lpac: SID 1 / mask 0x400.
  * SQE boots LPAC before consuming the first PM4 packet; both share bank 0.
  * SID 2 / 0x402 belongs to gfx3d_secure and is never leased. */
 constexpr uint16_t gpu_sids[] = {0, 0x400, 1, 0x401};
 constexpr unsigned gpu_stream_count = sizeof(gpu_sids) / sizeof(*gpu_sids);
 constexpr uint32_t SmmuContextFaultMask = 0xc00001feu;
+constexpr uint64_t GmemBaseIova = 0x1000000ULL;
 
 struct Device {
     PongCpOps ops{};
-    NativeAdrenoTablePages tables;
-    NativeAdrenoMemory buffers[5], metadata;
-    NativeAdrenoSmmuContext context;
-    NativeAdrenoVm vm;
+    NativeAdrenoGmuContextReport ctx_report{};
+    NativeAdrenoGpuBuffer gpu_buffers[GpuBufferCount]{};
+    OSSharedPtr<IOMemoryMap> gpu_maps[5];
+    volatile uint8_t *gpu_cpu[5]{};
+    NativeAdrenoMemory metadata;
     NativeAdrenoRing ring;
     NativeAdrenoCpInit init;
     NativeAdrenoSubmit submit;
@@ -55,7 +57,8 @@ struct Device {
     PongCpBackend backend{};
     OSSharedPtr<IOMemoryMap> zap_map;
     PongZapState zap{};
-    unsigned output_bits = 0;
+    size_t bank_offset = 0;
+    unsigned input_bits = 0, output_bits = 0;
     bool prepared = false, started = false, poisoned = false, irq_attached = false;
 };
 
@@ -138,8 +141,7 @@ static uint32_t classifyIrq(uint32_t status, uint32_t cp_status)
 static bool faulted()
 {
     if (!gpu || gpu->poisoned) return true;
-    const auto *p = gpu->context.programResult();
-    const uint32_t fsr = sr(p->context_offset + 0x58);
+    const uint32_t fsr = sr(gpu->bank_offset + 0x58);
     const uint32_t global = sr(0x48);
     const uint32_t irq = rd(GEN7_RBBM_INT_0_STATUS);
     const uint32_t cp = rd(GEN7_CP_HW_FAULT);
@@ -155,8 +157,8 @@ static bool faulted()
         note("CP cause/protect", cause, (uint64_t(protect) << 32) | rd(GEN7_CP_BV_PROTECT_STATUS),
              (uint64_t(rd(GEN7_CP_RB_RPTR)) << 32) | rd(GEN7_CP_RB_WPTR));
         if (fsr & SmmuContextFaultMask)
-            note("SMMU fault FAR", fsr, (uint64_t(sr(p->context_offset + 0x64)) << 32) | sr(p->context_offset + 0x60),
-                 (uint64_t(sr(p->context_offset + 0x68)) << 32) | sr(p->context_offset + 0x6c));
+            note("SMMU fault FAR", fsr, (uint64_t(sr(gpu->bank_offset + 0x64)) << 32) | sr(gpu->bank_offset + 0x60),
+                 (uint64_t(sr(gpu->bank_offset + 0x68)) << 32) | sr(gpu->bank_offset + 0x6c));
     }
     return gpu->poisoned;
 }
@@ -180,26 +182,18 @@ static void interrupt(void *)
     }
 }
 
-static int publish_ring(void *, const volatile uint32_t *words, size_t bytes)
+/* Ring, memptrs, pwrup, SQE, and scratch are mapped Normal-NC in the SMMU and
+ * write-combined on the CPU via IODeviceMemory, so only ordering is required. */
+static int publish_ring(void *, const volatile uint32_t *, size_t)
 {
-    const auto &m = gpu->buffers[1];
-    const auto base = reinterpret_cast<uintptr_t>(m.mapping());
-    const auto at = reinterpret_cast<uintptr_t>(words);
-    if (at < base || at - base > m.bytes() || bytes > m.bytes() - (at - base)) return 1;
-    const auto result = gpu->buffers[1].publishForDevice(at - base, bytes, false);
     __asm__ volatile("dsb sy" ::: "memory");
-    return result != kIOReturnSuccess;
+    return 0;
 }
 
-static int acquire_fence(void *, volatile uint32_t *words, size_t bytes)
+static int acquire_fence(void *, volatile uint32_t *, size_t)
 {
-    const auto &m = gpu->buffers[2];
-    const auto base = reinterpret_cast<uintptr_t>(m.mapping());
-    const auto at = reinterpret_cast<uintptr_t>(words);
-    if (at < base || at - base > m.bytes() || bytes > m.bytes() - (at - base)) return 1;
-    const auto result = gpu->buffers[2].acquireDeviceWrites(at - base, bytes);
     __asm__ volatile("dsb sy" ::: "memory");
-    return result != kIOReturnSuccess;
+    return 0;
 }
 
 static bool wait_fence(uint32_t fence)
@@ -234,7 +228,8 @@ static bool wait_bootstrap(uint32_t wptr, const char *phase)
     return false;
 }
 
-static int scm(void *, uint32_t fn, uint32_t info, const uint64_t args[3], int32_t *transport, int64_t *result)
+static int scm4(uint32_t fn, uint32_t info, uint64_t p0, uint64_t p1, uint64_t p2, uint64_t p3,
+                int32_t *transport, int64_t *result)
 {
     if (!gpu || !gpu->scm_lock) return 1;
     IOLockLock(gpu->scm_lock);
@@ -245,10 +240,10 @@ static int scm(void *, uint32_t fn, uint32_t info, const uint64_t args[3], int32
     for (unsigned resumes = 0; resumes < 10000 && now(nullptr) - begin < 1000000;) {
         register uint64_t x0 __asm__("x0") = first;
         register uint64_t x1 __asm__("x1") = info;
-        register uint64_t x2 __asm__("x2") = args[0];
-        register uint64_t x3 __asm__("x3") = args[1];
-        register uint64_t x4 __asm__("x4") = args[2];
-        register uint64_t x5 __asm__("x5") = 0;
+        register uint64_t x2 __asm__("x2") = p0;
+        register uint64_t x3 __asm__("x3") = p1;
+        register uint64_t x4 __asm__("x4") = p2;
+        register uint64_t x5 __asm__("x5") = p3;
         register uint64_t x6 __asm__("x6") = a6;
         register uint64_t x7 __asm__("x7") = 0;
         __asm__ volatile("smc #0"
@@ -261,7 +256,7 @@ static int scm(void *, uint32_t fn, uint32_t info, const uint64_t args[3], int32
             ++resumes;
             continue;
         }
-        if (int64_t(x0) == -2 && ++busy < 100) {
+        if ((int64_t(x0) == -2 || int64_t(x0) == -12) && ++busy < 100) {
             first = fn;
             a6 = 0;
             IOSleep(1);
@@ -274,6 +269,40 @@ static int scm(void *, uint32_t fn, uint32_t info, const uint64_t args[3], int32
     }
     IOLockUnlock(gpu->scm_lock);
     return rc;
+}
+
+static int scm(void *, uint32_t fn, uint32_t info, const uint64_t args[3], int32_t *transport, int64_t *result)
+{
+    return scm4(fn, info, args[0], args[1], args[2], 0, transport, result);
+}
+
+static void openCpAperture()
+{
+    /* QCOM_SCM_SVC_INFO (0x06) / IS_CALL_AVAIL (0x01) for SVC_MP (0x0c) / CP_SMMU_APERTURE_ID (0x1b). */
+    int32_t tr = -1;
+    int64_t res = 0;
+    if (scm4(0x42000601u, 1, 0x02000000u | (0x0cu << 8) | 0x1bu, 0, 0, 0, &tr, &res)) {
+        native_adreno_cp_aperture[0] = 0x800000ffu;
+        native_adreno_cp_aperture[1] = 0xffffffffu;
+        note("CP aperture avail err", 1);
+        return;
+    }
+    native_adreno_cp_aperture[0] = tr ? (0x80000000u | uint32_t(tr)) : uint32_t(res);
+    if (tr || !res) {
+        native_adreno_cp_aperture[1] = 0xffffffffu;
+        note("CP aperture unavailable", uint32_t(tr), uint64_t(res));
+        return;
+    }
+    /* QCOM_SCM_CP_APERTURE_REG (0) << 8 | context bank 0; remaining 3 args = 0xffffffff. */
+    tr = -1;
+    res = 0;
+    if (scm4(0x42000c1bu, 4, 0xffff0000u | (0u << 8) | 0u, 0xffffffffu, 0xffffffffu, 0xffffffffu, &tr, &res)) {
+        native_adreno_cp_aperture[1] = 0xfffffffeu;
+        note("CP aperture call err", 1);
+        return;
+    }
+    native_adreno_cp_aperture[1] = uint32_t(tr);
+    note("CP SMMU aperture", uint32_t(tr), native_adreno_cp_aperture[0], uint64_t(res));
 }
 
 static int zap_ready(void *) { return gpu->ring.outstanding() || faulted(); }
@@ -324,6 +353,8 @@ static bool hardware_init()
         !wr(GEN7_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffff) ||
         !wr64(GEN7_UCHE_TRAP_BASE_LO, 0x1fffffffff000ULL) ||
         !wr64(GEN7_UCHE_WRITE_THRU_BASE_LO, 0x1fffffffff000ULL) ||
+        !wr64(GEN7_UCHE_GMEM_RANGE_MIN_LO, GmemBaseIova) ||
+        !wr64(GEN7_UCHE_GMEM_RANGE_MAX_LO, GmemBaseIova + PongAdrenoGmemBytes - 1) ||
         !wr(GEN7_UCHE_CACHE_WAYS, 0x800000) || !wr(GEN7_UCHE_CMDQ_CONFIG, 0x6690e) ||
         !wr(GEN7_CP_AHB_CNTL, 1) || !wr(GEN7_RBBM_PERFCTR_CNTL, 1))
         return false;
@@ -354,12 +385,15 @@ static bool hardware_init()
     for (unsigned i = 0; i < count; i++) values[i] = rd(PongCpRestore[i]);
     const uint32_t dynamic[] = {0, GEN7_RBBM_PERFCTR_CNTL, 1};
     size_t written = 0;
+    static uint8_t pwrup_buf[GpuPageBytes];
+    bzero(pwrup_buf, sizeof(pwrup_buf));
     const NativeAdrenoPwrupCounts counts = {0, count, 1};
     if (NativeAdrenoPwrupList::pack(counts, nullptr, nullptr, PongCpRestore, values, dynamic,
-                                    static_cast<uint8_t *>(gpu->buffers[3].mapping()), sizes[3], &written))
+                                    pwrup_buf, sizeof(pwrup_buf), &written))
         return false;
+    for (size_t i = 0; i < sizeof(pwrup_buf); ++i) gpu->gpu_cpu[3][i] = pwrup_buf[i];
     __asm__ volatile("dsb sy" ::: "memory");
-    return !gpu->poisoned && !gpu->buffers[3].publishForDevice(0, sizes[3], false);
+    return !gpu->poisoned;
 }
 } // namespace
 
@@ -403,7 +437,8 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
         if (!valid && !leased) slots[found++] = i;
     }
     if (found != gpu_stream_count) return kIOReturnNoResources;
-    const size_t bank = pages * 4096;
+    const size_t bank = size_t(pages) * 4096;
+    gpu->bank_offset = bank;
     if (!sw(bank, 0) || sr(bank)) return kIOReturnIOError;
     /* SM8475 qcom,qsmmu-v500 ACTLR = 0x32b. */
     constexpr uint32_t actlr = 0x32b;
@@ -415,30 +450,45 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
             !sw(0xc00 + slots[i] * 4, 0x20000 | (ex ? 1024 : 0)))
             return kIOReturnIOError;
     }
-    IOReturn status = gpu->tables.begin(gpu->output_bits);
-    if (!status)
-        status = gpu->context.prepare(&gpu->tables, 0, 0, UINT64_C(0x100000000), 1048576, 0, 2, 4096, gpu->output_bits, 32);
-    if (!status) status = gpu->context.program(&ops->smmu);
-    ArmSmmu4KStream streams[gpu_stream_count] = {};
-    for (unsigned i = 0; i < gpu_stream_count; i++) streams[i] = {slots[i], gpu_sids[i]};
-    if (!status) status = gpu->context.attach(streams, gpu_stream_count);
-    NativeAdrenoVmRegion lower = {&gpu->tables, gpu->context.arenaHandle(), gpu->context.stateHandle()};
-    if (!status)
-        status = gpu->vm.attach(&ops->smmu, gpu->context.configHandle(), gpu->context.streamsHandle(), &lower, nullptr, 131072, 262144);
-    for (unsigned i = 0; i < 5 && !status; i++) {
-        status = gpu->buffers[i].allocate(sizes[i], gpu->output_bits, true, sizes[i]);
-        uint64_t handle = 0;
-        if (!status) status = gpu->buffers[i].makeWriteCombined();
-        if (!status) status = gpu->vm.map(&gpu->buffers[i], 0, iovas[i], i ? 3 : 5, 0, 2, &handle);
+    IOReturn status = NativeAdrenoGpuContextBringupStreams(
+        &ops->smmu, 0, 2, slots, gpu_sids, gpu_stream_count, nullptr, &gpu->ctx_report);
+    if (!status && sr(bank + 4) != actlr) {
+        if (!sw(bank + 4, actlr) || sr(bank + 4) != actlr) status = kIOReturnIOError;
+        else {
+            (void)sw(bank + 0x618, 0);
+            (void)sw(bank + 0x7f0, 0);
+            const uint64_t b = now(nullptr);
+            while ((sr(bank + 0x7f4) & 1u) && now(nullptr) - b < 2000) IODelay(1);
+        }
     }
-    if (!status && (PongAdrenoSqeFirmwareBytes < 8 || PongAdrenoSqeFirmwareBytes - 4 > sizes[0]))
+    if (!status) {
+        gpu->input_bits = NativeAdrenoGpuContextInputBits();
+        if (gpu->ctx_report.output_bits) gpu->output_bits = gpu->ctx_report.output_bits;
+        if (gpu->input_bits <= 32 || gpu->input_bits > 48) status = kIOReturnUnsupported;
+    }
+    if (!status) status = NativeAdrenoGpuContextBuffers(gpu->gpu_buffers);
+    for (unsigned i = 0; i < 5 && !status; ++i) {
+        IODeviceMemory *m = IODeviceMemory::withRange(gpu->gpu_buffers[i].physical, gpu->gpu_buffers[i].bytes);
+        if (m) {
+            gpu->gpu_maps[i] = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain);
+            m->release();
+        }
+        if (!gpu->gpu_maps[i]) {
+            status = kIOReturnNoMemory;
+            break;
+        }
+        gpu->gpu_cpu[i] = reinterpret_cast<volatile uint8_t *>(gpu->gpu_maps[i]->getVirtualAddress());
+    }
+    if (!status && (PongAdrenoSqeFirmwareBytes < 8 || PongAdrenoSqeFirmwareBytes - 4 > gpu->gpu_buffers[0].bytes))
         status = kIOReturnBadArgument;
     if (!status) {
-        memcpy(gpu->buffers[0].mapping(), PongAdrenoSqeFirmware + 4, PongAdrenoSqeFirmwareBytes - 4);
-        status = gpu->buffers[0].publishForDevice(0, sizes[0], false);
+        for (size_t i = 4; i < PongAdrenoSqeFirmwareBytes; ++i)
+            gpu->gpu_cpu[0][i - 4] = PongAdrenoSqeFirmware[i];
         __asm__ volatile("dsb sy" ::: "memory");
     }
-    note("GPU native4K/SQE prepared", unsigned(status), slots[0], slots[1]);
+    note("GPU 48b ctx/SQE ready", unsigned(status),
+         (uint64_t(gpu->input_bits) << 32) | gpu->output_bits,
+         (uint64_t(gpu->ctx_report.step) << 32) | gpu->ctx_report.routes_verified);
     gpu->prepared = !status;
     return status;
 }
@@ -461,13 +511,14 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
         return kIOReturnIOError;
     }
     NativeAdrenoRingCache cache = {nullptr, publish_ring, acquire_fence};
-    auto status = gpu->ring.attach(&gpu->ops.registers, &cache, gpu->buffers[1].mapping(), sizes[1], iovas[1],
-                                   gpu->buffers[2].mapping(), sizes[2], iovas[2]);
-    if (!status && (!wr64(GEN7_CP_BV_RB_RPTR_ADDR_LO, iovas[2] + 8) ||
-                    !wr64(GEN7_CP_SQE_INSTR_BASE_LO, iovas[0]) ||
+    auto status = gpu->ring.attach(&gpu->ops.registers, &cache,
+                                   const_cast<uint8_t *>(gpu->gpu_cpu[1]), gpu->gpu_buffers[1].bytes, gpu->gpu_buffers[1].iova,
+                                   const_cast<uint8_t *>(gpu->gpu_cpu[2]), gpu->gpu_buffers[2].bytes, gpu->gpu_buffers[2].iova);
+    if (!status && (!wr64(GEN7_CP_BV_RB_RPTR_ADDR_LO, gpu->gpu_buffers[2].iova + 8) ||
+                    !wr64(GEN7_CP_SQE_INSTR_BASE_LO, gpu->gpu_buffers[0].iova) ||
                     !wr(GEN7_CP_SQE_CNTL, 1)))
         status = kIOReturnIOError;
-    NativeAdrenoCpInitConfig config = {iovas[0], iovas[3], 1};
+    NativeAdrenoCpInitConfig config = {gpu->gpu_buffers[0].iova, gpu->gpu_buffers[3].iova, 1};
     uint32_t unused_fence = 0, fence = 0;
     if (!status) status = gpu->init.run(&gpu->ops.registers, &gpu->ring, &config, &unused_fence, false);
     const uint32_t init_wptr = gpu->ring.writePointer();
@@ -479,10 +530,10 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
         return kIOReturnIOError;
     const uint32_t ns_wptr = gpu->ring.writePointer();
     if (!wait_bootstrap(ns_wptr, "CP nonsecure drained")) return kIOReturnIOError;
-    auto *scratch = static_cast<volatile uint32_t *>(gpu->buffers[4].mapping());
+    auto *scratch = reinterpret_cast<volatile uint32_t *>(gpu->gpu_cpu[4]);
     scratch[0] = 0;
     __asm__ volatile("dsb sy" ::: "memory");
-    uint32_t write[4] = {0, uint32_t(iovas[4]), uint32_t(iovas[4] >> 32), 0x7300302};
+    uint32_t write[4] = {0, uint32_t(gpu->gpu_buffers[4].iova), uint32_t(gpu->gpu_buffers[4].iova >> 32), 0x7300302};
     if (AdrenoPM4Type7(0x3d, 3, write) != AdrenoPM4Success || gpu->ring.submit(write, 4, &fence) || !wait_fence(fence))
         return kIOReturnIOError;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -502,21 +553,31 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
         return status;
     }
     gpu->irq_attached = true;
-    status = gpu->submit.attach(&gpu->vm, &gpu->ring);
+    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
+    if (!vm) return kIOReturnNotReady;
+    status = gpu->submit.attach(vm, &gpu->ring);
     NativeAdrenoTimeIo timer = {gpu->ops.registers.cookie, gpu->ops.registers.read32};
     if (!status) status = gpu->timer.attach(&timer, NativeAdrenoTimeCp);
     uint64_t ticks = 0;
     if (!status) status = gpu->timer.read(&ticks);
     if (status || !ticks) return status ? status : kIOReturnNotReady;
-    gpu->ring.setTimeline(true);
+    unsigned timeline = 0;
+    PE_parse_boot_argn("gpu-timeline", &timeline, sizeof(timeline));
+    gpu->ring.setTimeline(timeline != 0);
     gpu->started = true;
-    native_adreno_wc_enabled = 1;
+    {
+        unsigned wc = 1;
+        PE_parse_boot_argn("gpu-wc", &wc, sizeof(wc));
+        native_adreno_wc_enabled = wc ? 1 : 0;
+    }
+    openCpAperture();
+    const uint64_t va_size = gpu->input_bits > 32 ? (UINT64_C(1) << gpu->input_bits) - GpuClientVaStart : 0;
     gpu->backend = {
-        &gpu->vm, &gpu->submit, &gpu->ring, &gpu->timer, &gpu->status,
+        vm, &gpu->submit, &gpu->ring, &gpu->timer, &gpu->status,
         {nullptr, now, idle},
-        {PongAdrenoChipId, PongAdrenoGmemBytes, 0, 0x1fffffffff000ULL, 0x20000000, 0xA0000000,
+        {PongAdrenoChipId, PongAdrenoGmemBytes, GmemBaseIova, 0x1fffffffff000ULL, GpuClientVaStart, va_size,
          PongAdrenoHighestBankBit, 6, 1, 4, NativeAdrenoDeviceClientIova, 0},
-        gpu->output_bits, client_healthy
+        gpu->input_bits, gpu->output_bits, client_healthy
     };
     note("CP ready; nonsecure fence ok", 0, fence, ticks);
     return PongAdrenoPublishClient(&gpu->backend) ? kIOReturnSuccess : kIOReturnNoResources;

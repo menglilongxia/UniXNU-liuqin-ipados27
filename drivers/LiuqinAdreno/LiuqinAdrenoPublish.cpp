@@ -19,6 +19,8 @@ extern "C" unsigned native_adreno_accelerator_instance_size(void);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" volatile uint32_t native_liuqin_gpu_stats[8];
+extern "C" volatile uint32_t native_adreno_cp_aperture[4];
+extern "C" volatile uint32_t native_adreno_table_switches[8];
 
 /* Strong definitions for optional board hooks declared weak_import in
  * NativeAdrenoPublish/Submit; avoids arm64e chained fixup imports in XnuPrelink. */
@@ -98,11 +100,17 @@ bool PongAdrenoPublishClient(PongCpBackend *device)
     gBackend = device;
     const IOReturn result = native_adreno_publish(
         device->vm, device->submit, device->ring, &device->clock,
-        device->timer, &device->info, 32, device->output_bits);
+        device->timer, &device->info, device->input_bits, device->output_bits);
     if (result) {
-        IOLog("LIUQIN ADRENO: native_adreno_publish failed 0x%x\n", unsigned(result));
+        IOLog("LIUQIN ADRENO: native_adreno_publish failed 0x%x (ias=%u oas=%u)\n",
+              unsigned(result), device->input_bits, device->output_bits);
         return false;
     }
+    IOLog("LIUQIN ADRENO: published ias=%u oas=%u ap=0x%x/0x%x/0x%x/m%u sw_err=0x%x\n",
+          device->input_bits, device->output_bits,
+          native_adreno_cp_aperture[0], native_adreno_cp_aperture[1],
+          native_adreno_cp_aperture[2], native_adreno_cp_aperture[3],
+          native_adreno_table_switches[6]);
     IOService *service = native_adreno_published_service();
     if (!service) return false;
     service->setProperty("LiuqinAdrenoCPReady", kOSBooleanTrue);

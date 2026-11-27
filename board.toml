@@ -223,7 +223,6 @@ kernel_args = [
   "armcpu-idle-latency-us=100000",
   "data-persist=2",
   "sheng-data-persist=2",
-  "amfi_get_out_of_my_way=1",
   "disable-watchdogd=1",
   "lite=1",
 ]

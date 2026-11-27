@@ -537,6 +537,10 @@ extern volatile int32_t native_adsp_stats[16], native_battery_stats[16];
 extern volatile uint32_t native_usb_stats[54], native_board_clock[16];
 extern volatile uint32_t native_liuqin_gpu_stats[8];
 extern char native_liuqin_gpu_phase[64];
+extern uint32_t native_adreno_publish_stats(uint32_t *);
+extern volatile uint32_t native_adreno_mount_fail[4];
+extern volatile uint32_t native_adreno_cp_aperture[4];
+extern volatile uint32_t native_adreno_table_switches[8];
 extern volatile uint32_t native_touch_stage_done, native_touch_frames;
 extern volatile uint32_t native_ufs_dpu_state, native_legacy_direct[14];
 extern char native_cpufreq_row[120];
@@ -635,6 +639,15 @@ void busyReport(void *, wait_result_t) {
                   native_liuqin_gpu_stats[2], native_liuqin_gpu_stats[3],
                   native_liuqin_gpu_stats[5], native_liuqin_gpu_stats[6], native_liuqin_gpu_stats[7],
                   native_liuqin_gpu_phase);
+            uint32_t gpu_closed = 0;
+            const uint32_t gpu_opened = native_adreno_publish_stats(&gpu_closed);
+            IOLog("liuqin mtl: pub=%u/%u ap=0x%x/0x%x/0x%x/m%u sw=%u/%u/live=%u/e=0x%x mnt=%u/0x%x/n=%u\n",
+                  gpu_opened, gpu_closed,
+                  native_adreno_cp_aperture[0], native_adreno_cp_aperture[1],
+                  native_adreno_cp_aperture[2], native_adreno_cp_aperture[3],
+                  native_adreno_table_switches[0], native_adreno_table_switches[1],
+                  native_adreno_table_switches[4], native_adreno_table_switches[6],
+                  native_adreno_mount_fail[0], native_adreno_mount_fail[1], native_adreno_mount_fail[3]);
         }
         if (!busy && round > 4) break;
     }

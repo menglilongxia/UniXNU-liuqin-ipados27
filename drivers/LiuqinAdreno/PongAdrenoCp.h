@@ -15,6 +15,7 @@ struct PongCpBackend {
     NativeAdrenoStatus *status;
     NativeAdrenoRingClock clock;
     NativeAdrenoAbiDeviceInfo info;
+    unsigned input_bits;
     unsigned output_bits;
     bool (*healthy)();
 };

@@ -528,12 +528,15 @@ extern void sheng_board_clock_probe(void);
 extern void sheng_usb_probe(void);
 extern void sheng_adsp_probe(void);
 extern void sheng_battery_probe(void);
+extern void liuqin_adreno_start_optional(void);
 extern void native_hid_input_probe(void);
 extern volatile uint32_t armcpu_smp_running, armcpu_gic_boot[8], armcpu_smp_step[8], armcpu_smp_fail[8];
 extern volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
 extern volatile int32_t native_buttons_stats[10], native_backlight_stats[16];
 extern volatile int32_t native_adsp_stats[16], native_battery_stats[16];
 extern volatile uint32_t native_usb_stats[54], native_board_clock[16];
+extern volatile uint32_t native_liuqin_gpu_stats[8];
+extern char native_liuqin_gpu_phase[64];
 extern volatile uint32_t native_touch_stage_done, native_touch_frames;
 extern volatile uint32_t native_ufs_dpu_state, native_legacy_direct[14];
 extern char native_cpufreq_row[120];
@@ -627,6 +630,11 @@ void busyReport(void *, wait_result_t) {
                   native_adsp_stats[0], native_adsp_stats[1], native_adsp_stats[7], native_adsp_stats[11],
                   native_battery_stats[0], native_battery_stats[1], native_battery_stats[2], native_battery_stats[3],
                   native_board_clock[0], native_board_clock[7]);
+            IOLog("liuqin gpu: st=%u rc=%u mhz=%u gmu=0x%x/0x%x mtl=%u/0x%x/%u (%.48s)\n",
+                  native_liuqin_gpu_stats[0], native_liuqin_gpu_stats[1], native_liuqin_gpu_stats[4],
+                  native_liuqin_gpu_stats[2], native_liuqin_gpu_stats[3],
+                  native_liuqin_gpu_stats[5], native_liuqin_gpu_stats[6], native_liuqin_gpu_stats[7],
+                  native_liuqin_gpu_phase);
         }
         if (!busy && round > 4) break;
     }
@@ -644,6 +652,7 @@ void native_legacy_display_late_probe(void) {
     sheng_usb_probe();
     sheng_adsp_probe();
     sheng_battery_probe();
+    liuqin_adreno_start_optional();
     sheng_buttons_probe();
     sheng_backlight_probe();
     native_hid_input_probe();

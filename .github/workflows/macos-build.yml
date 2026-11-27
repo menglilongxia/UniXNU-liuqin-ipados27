@@ -106,13 +106,25 @@ jobs:
 
       - name: Install host tools
         run: |
-          brew install llvm lld mtools dtc nasm blacktop/tap/ipsw
+          brew install llvm lld mtools dtc nasm glslang bison blacktop/tap/ipsw
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           if ! command -v unifdef >/dev/null; then
             brew install unifdef
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
+
+      - name: Install Rust 1.98.0 + rust-src (for AdrenoMetal bridge)
+        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          rustup run 1.98.0 rustc --version
 
       - name: Report toolchain
         run: |
@@ -216,29 +228,7 @@ jobs:
         working-directory: UniXNU
         run: ./unixnu build firmware -D ../device --uefi ../uefi-sheng
 
-      - name: Fetch and bundle 24A446 OS trust caches
-        if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
-        working-directory: UniXNU
-        run: |
-          ./unixnu ipsw fetch StaticTrustCache "Cryptex1,SystemTrustCache" -D ../device
-          python3 - <<'PY'
-          import struct, sys
-          from pathlib import Path
-          sys.path.insert(0, 'scripts')
-          from unixnu.ipsw import im4p_payload
-          base = Path('out/ipsw/24A446')
-          tcs = sorted(base.glob('*.trustcache'), key=lambda p: p.stat().st_size, reverse=True)
-          assert len(tcs) >= 2, f'Expected 2 trust caches, found {tcs}'
-          static = im4p_payload(tcs[0].read_bytes())
-          system = im4p_payload(tcs[1].read_bytes())
-          bundle = struct.pack('<3I', 2, 12, 12 + len(static)) + static + system
-          out = Path('build/liuqin-trust.bundle')
-          out.parent.mkdir(parents=True, exist_ok=True)
-          out.write_bytes(bundle)
-          print(f'Bundled {tcs[0].name} ({len(static)}B) + {tcs[1].name} ({len(system)}B) -> {len(bundle)}B')
-          PY
-
-      - name: Build payload.img
+      - name: Build Turnip/Metal/AppSync runtime & payload.img
         id: payload
         if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
         working-directory: UniXNU
@@ -247,7 +237,6 @@ jobs:
         run: |
           ./unixnu build payload -D ../device --uefi ../uefi-sheng \
             --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID:-0x84750A0B0C0D0001}" \
-            --trust-cache build/liuqin-trust.bundle \
             --data-ramdisk build/liuqin-data.dbr
 
       - name: Build boot.img

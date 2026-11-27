@@ -21,7 +21,7 @@ lba_bytes = 4096
 
 [components]
 # Official UniXNU Format 2 components matching UniXNU-sheng (iPadOS 27 arm64e),
-# adding QcomGeniSpi for NT36532 touch and omitting SM8550-specific Adreno740.
+# adding QcomGeniSpi (NT36532 touch) and Adreno740/AdrenoMetal/AirNir for SM8475 Adreno 730 GPU/Metal.
 include = [
   "ArmDTPlatform",
   "ArmCpu",
@@ -30,6 +30,9 @@ include = [
   "ShengUfs",
   "QcomGeniSpi",
   "RamBlock",
+  "Adreno740",
+  "AdrenoMetal",
+  "AirNir",
   "GopFramebuffer",
   "AppleKeyStoreState",
 ]
@@ -45,6 +48,9 @@ archives = [
   "component:ShengUfs",
   "build-sheng-source-storage.py --policy-dir scripts/policies/ipados-27.0.1-24A446",
   "component:RamBlock",
+  "fetch-liuqin-adreno-firmware.py",
+  "build-liuqin-adreno-kits.py",
+  "build-adreno740-accelerator.py",
   "component:AppleKeyStoreState",
   "build-liuqin-gop-display-27.py",
   "build-fileset-release-reference.py --tree . --lto",
@@ -162,7 +168,7 @@ dtb_node = [
 
 [payload]
 volume = "LIUQINESP"
-size_mib = 176
+size_mib = 192
 timeout = 5
 root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
 loader = "firmware"
@@ -201,12 +207,18 @@ kernel_args = [
   "cpufreq=4",
   "smp=1",
   "dpu=1",
-  "dpu-scanout=2",
+  "gpu-power=9",
+  "gpu-metal=1",
+  "fb-gpu=1",
+  "fb-bgra=1",
+  "no-lc=1",
+  "gpu-addon=1",
+  "appsync=1",
   "usb=1",
   "adsp=2",
   "battery=1",
   "board-clock=3",
-  "vsync=120",
+  "vsync=60",
   "vsync-fixed=1",
   "armcpu-idle-latency-us=100000",
   "data-persist=2",
@@ -215,6 +227,16 @@ kernel_args = [
   "disable-watchdogd=1",
   "lite=1",
 ]
+
+[payload.runtime]
+tool = "scripts/build-boot-runtime.py"
+target = "ios27"
+build = "24A446"
+data_gib = 64
+skip_setup = true
+trust_components = ["StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
+wallpapers = ["ipados27", "ipados27-floating"]
+appsync = true
 
 [payload.adt]
 # Matches Apple iPad17,3 (0x8142) from profiles/os/ipados-27.0.1-24A446/profile.toml.

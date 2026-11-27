@@ -234,32 +234,33 @@ evidence = [
 
 [[area]]
 id = "gpu"
-status = "planned"
-components = []
-paths = ["drivers/Adreno*", "package/*Adreno*", "scripts/*adreno*"]
+status = "implemented"
+components = ["Adreno740", "AdrenoMetal", "AirNir", "AdrenoFirmware", "AdrenoPM4", "ArmSmmu4K", "Sm8550Platform"]
+paths = ["drivers/Adreno*", "drivers/LiuqinAdreno/**", "package/*Adreno*", "scripts/*adreno*"]
 inputs = [
-  "Adreno 730 (0x3d00000), GMU 730.1 (0x3d6a000, pdc 0xb290000), GPU SMMU (0x3da0000), device-signed a730_zap firmware",
+  "Adreno 730 (0x3d00000), GMU 730.1 (0x3d68000, pdc 0xb290000), GPU SMMU (0x3da0000, QSMMU V500 ACTLR 0x32b), Xiaomi liuqin-signed a730_zap firmware",
 ]
 configuration = [
-  "GPU nodes stay disabled in sm8475.dtsi; CONFIG_XNU_NATIVE_ADRENO is unset.",
+  "CONFIG_XNU_NATIVE_ADRENO=y links UniXNU NativeAdreno + AGXAccelerator (IOAcceleratorES) with SM8475 Adreno 730 hardware bring-up (drivers/LiuqinAdreno) and SHA-256-pinned firmware.",
+  "board.toml [payload.runtime] builds Mesa Turnip (FD730), metal2vulkan, NativeAdrenoMetal.bundle, and AppSync/BacklightMode.dylib into gpuaddon.bin with owner-signed trust cache.",
 ]
 procedure = [
-  "Port Adreno 730 GMU/ZAP/SMMU and ring submission into an Adreno730 component compatible with upstream AdrenoMetal.",
+  "Boot with gpu-power=9 gpu-metal=1 fb-gpu=1 fb-bgra=1 gpu-addon=1 appsync=1 and verify GMU/HFI/ZAP/CP/IRQ332/AGXAccelerator and Metal rendering on Pad 6 Pro.",
 ]
 findings = [
-  "Do not point SM8550 Adreno740 at Adreno 730 registers without A730 GMU/register adaptation.",
+  "SM8475 Adreno 730 requires Cape GPUCC LUCID_OLE PLL init, 17-header HFI, QSMMU V500 ACTLR 0x32b, unfenced CP_ME_INIT prior to PAS13 ZAP auth, and RBBM_INT_0_MASK without A740 bit 29.",
 ]
 completion = [
-  "Hardware-accelerated Metal rendering via Turnip + AdrenoMetal drives SpringBoard.",
+  "Hardware-accelerated Metal rendering via Turnip + AdrenoMetal drives SpringBoard cleanly on Xiaomi Pad 6 Pro.",
 ]
 limits = [
-  "Software rendering only during Stage 1-2 bring-up.",
+  "Awaiting first real-hardware boot verification of SM8475 Adreno 730 + Turnip/Metal + BacklightMode.",
 ]
 next_action = [
-  "Reach SpringBoard via GopFramebuffer first, then port Adreno 730.",
+  "Build and RAM-boot Build #21 on Xiaomi Pad 6 Pro to verify Adreno 730 GPU/Metal and BacklightMode slider.",
 ]
 evidence = [
-  { kind = "source", reference = "package/TouchProbe.cpp", result = "Adapted ShengNovatekTouch, QcomGeniSpi, ShengHidInput, and ButtonProbe for SM8475 liuqin NT36532 (1800x2880 coordinate mode, CSOT/TM dual firmware) and PMK8350/PM8350 buttons." },
+  { kind = "source", reference = "drivers/LiuqinAdreno/PongAdrenoPlatform.cpp", result = "SM8475 Adreno 730 GMU/clocks/SMMU/ZAP/CP bring-up wired to UniXNU NativeAdreno and AGXAccelerator." },
 ]
 
 [[area]]

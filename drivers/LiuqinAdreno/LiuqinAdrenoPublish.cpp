@@ -20,6 +20,15 @@ extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" volatile uint32_t native_liuqin_gpu_stats[8];
 
+/* Optional board hooks declared weak_import in NativeAdrenoPublish/Submit;
+ * Darwin static kernel link requires a weak definition to satisfy ld. */
+extern "C" int boot_log_export_put(uint32_t, uint32_t, uint32_t, const void *, uint32_t) __attribute__((weak));
+extern "C" int boot_log_export_put(uint32_t, uint32_t, uint32_t, const void *, uint32_t) { return -1; }
+extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *, void (*)(void *), void *) __attribute__((weak));
+extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *, void (*)(void *), void *) { return KERN_NOT_SUPPORTED; }
+extern "C" volatile uint32_t native_gpu_dcvs[15] __attribute__((weak));
+volatile uint32_t native_gpu_dcvs[15];
+
 namespace {
 PongCpBackend *gBackend = nullptr;
 

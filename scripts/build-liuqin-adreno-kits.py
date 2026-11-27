@@ -40,7 +40,6 @@ EXCLUDED_ADRENO740 = {
     'NativeAdrenoGmuMemory.cpp',
     'NativeAdrenoGmuPlatform.cpp',
     'NativeAdrenoGmuService.cpp',
-    'NativeAdrenoGpuContext.cpp',
     'NativeAdrenoKernelTime.cpp',
     'NativeAdrenoService.cpp',
     'NativeAdrenoSmmuService.cpp',

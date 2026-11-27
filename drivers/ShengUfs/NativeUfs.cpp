@@ -1577,8 +1577,9 @@ static bool hostBringUp (const char **why)
     }
     native_ufs_extra_stream = 0x80000000U | extraReport[0];
   }
-  // The display's streams (dpu=2 or more, or dpu-scanout), read here for the same reason: what the boot loader left for 0x1c00 and 0x1c02 (`iommus =
-  // <&apps_smmu 0x1c00 0x2>`), the first step of letting the display fetch the compositor's pages. Nothing is written.
+  // The display's streams (dpu=2 or more, or dpu-scanout), read here for the same reason: what the boot loader left for 0x2800 and 0x2802
+  // (`iommus = <&apps_smmu 0x2800 0x402>` on SM8475 liuqin; verified SMR=0x84022800 cb=3 on hardware), the first step of letting the display
+  // fetch the compositor's pages. Nothing is written until dpuEnable() below.
   uint32_t dpu = 0, scanout = 0;
   PE_parse_boot_argn ("dpu", &dpu, sizeof (dpu));
   PE_parse_boot_argn ("dpu-scanout", &scanout, sizeof (scanout));
@@ -1597,7 +1598,7 @@ static bool hostBringUp (const char **why)
       const uint32_t mask = (smr >> 16) & 0x7fff;
       for (unsigned k = 0; k < 2; ++k) {
         volatile uint32_t *r = &native_ufs_dpu_smmu[4 + 9 * k];
-        if (r[0] != 0xffffffffU || ((smr ^ (0x1c00U + 2 * k)) & 0x7fff & ~mask)) continue;
+        if (r[0] != 0xffffffffU || ((smr ^ (0x2800U + 2 * k)) & 0x7fff & ~mask)) continue;
         const uint32_t s2cr = read32 (s, 0xc00 + 4 * i), bank = s2cr & 255;
         r[0] = i | (bank << 16); r[1] = smr; r[2] = s2cr;
         if (((s2cr >> 16) & 3) == 0 && bank < banks && (pages + banks) * 4096 <= 0xd0000) {

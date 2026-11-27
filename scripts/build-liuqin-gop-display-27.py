@@ -187,6 +187,132 @@ for i in range(BASE, len(slots)):
         header += f' virtual __attribute__((deprecated("Unclassified ABI: never call from source"))) void opaque{i}();\n'
 header += f'}};\nstatic_assert(sizeof(IOMobileFramebufferLegacy)=={abi["instance_size"]},"Actual original instance extent");\n'
 (OUT / 'OriginalLegacyFramebufferABI.h').write_text(header)
+
+# Adapt NativeLegacyDisplay DPU direct scanout to auto-detect liuqin's active DPU 8.1 pipes, CTL, boot IOVA, and stride.
+nld_path = ROOT / 'drivers/GopFramebuffer/NativeLegacyDisplay.cpp'
+nld_text = nld_path.read_text()
+if 'directBootStride' not in nld_text:
+    replacements = [
+        (
+            '    bool directOn=false,directBoot=true;\n'
+            '    static constexpr uint32_t kVig[2]={0x4000,0x6000},kCtlFlush=0x15018,kBootIova=0xb8000000U,kBootStride=0x2fa0;\n'
+            '    void startDirect() {\n'
+            '        unsigned mode=0;PE_parse_boot_argn("dpu-scanout",&mode,sizeof(mode));\n'
+            '        if(mode<2 || !&native_ufs_dpu_map || !&native_ufs_dpu_state || !(native_ufs_dpu_state>>31) || !primary)return;\n'
+            '        IODeviceMemory *memory=IODeviceMemory::withRange(0xae01000,0x8f000);\n'
+            '        mdpMap=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;\n'
+            '        if(memory)memory->release();\n'
+            '        directPages=static_cast<uint64_t *>(IOMallocData(8192*sizeof(uint64_t)));\n'
+            '        IOWorkLoop *loop=getWorkLoop();\n'
+            '        latchTimer=loop?IOTimerEventSource::timerEventSource(this,&NativeLegacyDisplay::latchFired):nullptr;\n'
+            '        fenceTimer=loop?IOTimerEventSource::timerEventSource(this,&NativeLegacyDisplay::fenceFired):nullptr;\n'
+            '        if(!mdpMap || !directPages || !latchTimer || !fenceTimer || loop->addEventSource(fenceTimer)!=kIOReturnSuccess || loop->addEventSource(latchTimer)!=kIOReturnSuccess) {\n'
+            '            OSSafeReleaseNULL(mdpMap);OSSafeReleaseNULL(latchTimer);OSSafeReleaseNULL(fenceTimer);\n'
+            '            if(directPages){IOFreeData(directPages,8192*sizeof(uint64_t));directPages=nullptr;}\n'
+            '            return;\n'
+            '        }\n'
+            '        mdp=reinterpret_cast<volatile uint32_t *>(mdpMap->getVirtualAddress());\n'
+            '        directOn=true;gDirectDisplay=this;\n'
+            '    }',
+            '    bool directOn=false,directBoot=true;\n'
+            '    uint32_t directPipes[4]={0x4000,0x6000,0,0},directPipeDeltas[4]={0,0,0,0};\n'
+            '    unsigned directPipeCount=0;\n'
+            '    uint32_t directCtlFlush=0x15018,directFlushMask=0x3;\n'
+            '    uint32_t directBootIova=0xb8000000U,directBootStride=0x1c20;\n'
+            '    void startDirect() {\n'
+            '        unsigned mode=0;PE_parse_boot_argn("dpu-scanout",&mode,sizeof(mode));\n'
+            '        if(mode<2 || !&native_ufs_dpu_map || !&native_ufs_dpu_state || !(native_ufs_dpu_state>>31) || !primary)return;\n'
+            '        IODeviceMemory *memory=IODeviceMemory::withRange(0xae01000,0x8f000);\n'
+            '        mdpMap=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;\n'
+            '        if(memory)memory->release();\n'
+            '        directPages=static_cast<uint64_t *>(IOMallocData(8192*sizeof(uint64_t)));\n'
+            '        IOWorkLoop *loop=getWorkLoop();\n'
+            '        latchTimer=loop?IOTimerEventSource::timerEventSource(this,&NativeLegacyDisplay::latchFired):nullptr;\n'
+            '        fenceTimer=loop?IOTimerEventSource::timerEventSource(this,&NativeLegacyDisplay::fenceFired):nullptr;\n'
+            '        if(!mdpMap || !directPages || !latchTimer || !fenceTimer || loop->addEventSource(fenceTimer)!=kIOReturnSuccess || loop->addEventSource(latchTimer)!=kIOReturnSuccess) {\n'
+            '            OSSafeReleaseNULL(mdpMap);OSSafeReleaseNULL(latchTimer);OSSafeReleaseNULL(fenceTimer);\n'
+            '            if(directPages){IOFreeData(directPages,8192*sizeof(uint64_t));directPages=nullptr;}\n'
+            '            return;\n'
+            '        }\n'
+            '        mdp=reinterpret_cast<volatile uint32_t *>(mdpMap->getVirtualAddress());\n'
+            '        PE_Video video={};\n'
+            '        if(!PE_current_console(&video) && video.v_baseAddr && video.v_rowBytes) {\n'
+            '            directBootIova=uint32_t(video.v_baseAddr);\n'
+            '            directBootStride=uint32_t(video.v_rowBytes);\n'
+            '        }\n'
+            '        static constexpr uint32_t kCandPipes[8]={0x4000,0x6000,0x8000,0xa000,0x24000,0x26000,0x28000,0x2a000};\n'
+            '        static constexpr uint32_t kCandBits[8]={1u<<0,1u<<1,1u<<2,1u<<18,1u<<11,1u<<12,1u<<24,1u<<25};\n'
+            '        directPipeCount=0;directFlushMask=0;\n'
+            '        for(unsigned k=0;k<8 && directPipeCount<4;++k) {\n'
+            '            const uint32_t p=kCandPipes[k];\n'
+            '            const uint32_t srcSize=mdp[p/4];\n'
+            '            const uint32_t src0=mdp[(p+0x14)/4];\n'
+            '            const uint32_t stride0=mdp[(p+0x24)/4]&0xffffu;\n'
+            '            if(srcSize && stride0==directBootStride && src0>=directBootIova && src0<directBootIova+directBootStride) {\n'
+            '                directPipes[directPipeCount]=p;\n'
+            '                directPipeDeltas[directPipeCount]=src0-directBootIova;\n'
+            '                directFlushMask|=kCandBits[k];\n'
+            '                ++directPipeCount;\n'
+            '            }\n'
+            '        }\n'
+            '        directCtlFlush=0x15018;\n'
+            '        for(unsigned c=0;c<4;++c) {\n'
+            '            const uint32_t ctl=0x15000u+c*0x1000u;\n'
+            '            if(mdp[(ctl+0xf4u)/4]){directCtlFlush=ctl+0x18u;break;}\n'
+            '        }\n'
+            '        if(!directPipeCount || !directFlushMask) {\n'
+            '            IOLog("dpu-scanout: no active pipe matched boot=0x%x stride=%u; staying on copy path\\n",directBootIova,directBootStride);\n'
+            '            return;\n'
+            '        }\n'
+            '        IOLog("dpu-scanout: active pipes=%u mask=0x%x ctl=0x%x boot=0x%x/%u\\n",\n'
+            '              directPipeCount,directFlushMask,directCtlFlush,directBootIova,directBootStride);\n'
+            '        directOn=true;gDirectDisplay=this;\n'
+            '    }',
+        ),
+        (
+            '    void flip(uint32_t iova,uint32_t stride) {\n'
+            '        shownStride=stride;\n'
+            '        for(uint32_t vig:kVig){mdp[(vig+0x14)/4]=iova;mdp[(vig+0x24)/4]=stride&0xffff;}\n'
+            '        __asm__ volatile("dsb sy" ::: "memory");\n'
+            '        mdp[kCtlFlush/4]=0x3;\n'
+            '        __asm__ volatile("dsb sy" ::: "memory");\n'
+            '    }',
+            '    void flip(uint32_t iova,uint32_t stride) {\n'
+            '        shownStride=stride;\n'
+            '        for(unsigned k=0;k<directPipeCount;++k) {\n'
+            '            const uint32_t p=directPipes[k];\n'
+            '            mdp[(p+0x14)/4]=iova+directPipeDeltas[k];\n'
+            '            mdp[(p+0x24)/4]=stride&0xffff;\n'
+            '        }\n'
+            '        __asm__ volatile("dsb sy" ::: "memory");\n'
+            '        mdp[directCtlFlush/4]=directFlushMask;\n'
+            '        __asm__ volatile("dsb sy" ::: "memory");\n'
+            '    }',
+        ),
+        (
+            '        gpuTraceEvent(GpuTraceDisplayLatch,0,traceId(latchRequest),mdp[kCtlFlush/4],ns,shownSlot,pendingSlot);\n'
+            '        if((mdp[kCtlFlush/4]&0x3) && ns<50000000ull){latchTimer->setTimeoutUS(500);return;}',
+            '        gpuTraceEvent(GpuTraceDisplayLatch,0,traceId(latchRequest),mdp[directCtlFlush/4],ns,shownSlot,pendingSlot);\n'
+            '        if((mdp[directCtlFlush/4]&directFlushMask) && ns<50000000ull){latchTimer->setTimeoutUS(500);return;}',
+        ),
+        (
+            '    void directToBoot() {\n'
+            '        if(!directOn || directBoot)return;\n'
+            '        flip(kBootIova,kBootStride);directBoot=true;shownSlot=-1;\n'
+            '        native_legacy_direct[8]=native_legacy_direct[8]+1;\n'
+            '    }',
+            '    void directToBoot() {\n'
+            '        if(!directOn || directBoot)return;\n'
+            '        flip(directBootIova,directBootStride);directBoot=true;shownSlot=-1;\n'
+            '        native_legacy_direct[8]=native_legacy_direct[8]+1;\n'
+            '    }',
+        ),
+    ]
+    for old_s, new_s in replacements:
+        require(old_s in nld_text, f'NativeLegacyDisplay.cpp DPU patch target missing: {old_s[:60]}')
+        nld_text = nld_text.replace(old_s, new_s, 1)
+    nld_path.write_text(nld_text)
+
 print(run(['python3', ROOT / 'scripts/build-arm-driver.py', 'NativeLegacyDisplay'], text=True), end='')
 
 
@@ -380,8 +506,18 @@ extern "C" void boot_progress_cancel_scanout(void) {}
 extern "C" void boot_progress_stage(const char *) {}
 extern "C" int boot_progress_pulse_anchor(uintptr_t,uint64_t,unsigned,unsigned,unsigned) {return 0;}
 // Optional GPU/DPU/trace symbols: hidden weak no-op defaults so ld emits zero chained fixup imports.
-extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences(uint32_t *, uint32_t *) {return false;}
-extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) {return false;}
+// When no GPU driver is linked, report 0/0 fences ready so DPU direct scanout does not stall waiting on a GPU fence.
+extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences(uint32_t *submitted, uint32_t *retired) {
+    if (submitted) *submitted = 0;
+    if (retired) *retired = 0;
+    return true;
+}
+extern "C" __attribute__((weak, visibility("hidden"))) bool native_adreno_fences_detail(uint32_t *submitted, uint32_t *retired, uint32_t *detail) {
+    if (submitted) *submitted = 0;
+    if (retired) *retired = 0;
+    if (detail) {detail[0] = 0; detail[1] = 0; detail[2] = 0;}
+    return true;
+}
 extern "C" __attribute__((weak, visibility("hidden"))) uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) {return 0;}
 extern "C" __attribute__((weak, visibility("hidden"))) volatile uint32_t native_ufs_dpu_state = 0;
 extern "C" __attribute__((weak, visibility("hidden"))) int native_gpu_trace_enabled(void) {return 0;}
@@ -502,12 +638,12 @@ input_objects = [hid_late, OUT / 'hid-bindings.o', OUT / 'hid-addresses.o', OUT 
     [SRC / (stem + '.o') for stem in ('TouchProbe', 'ButtonProbe', 'GeniSpi', 'NvtProtocol', 'NvtTouchCore', 'NvtFirmware')]
 print(f'HID: {len(hid_bindings)} original IOHIDDevice bindings, vtables {hid_vtables} match the original diversities')
 
-# Board drivers: SM8475 EPSS CPUFreq, single-KTZ8866 Backlight (+ GeniI2c), and TM panel touch firmware fallback.
+# Board drivers: SM8475 EPSS CPUFreq, single-KTZ8866 Backlight (+ GeniI2c), DPU timing probe, and TM panel touch firmware fallback.
 board_dir = OUT / 'board'
 board_dir.mkdir(exist_ok=True)
 KITS = ROOT / 'kits/sheng'
 board_objects = []
-for stem in ('CpuFreqProbe', 'BacklightProbe'):
+for stem in ('CpuFreqProbe', 'BacklightProbe', 'DisplayTimingProbe'):
     compile_cpp(KITS / (stem + '.cpp'), board_dir / (stem + '.o'))
     board_objects.append(board_dir / (stem + '.o'))
 compile_cpp(KITS / 'AppleARMBacklight.cpp', board_dir / 'AppleARMBacklight.o')
@@ -548,6 +684,7 @@ sources = [
     hid_probe,
     KITS / 'CpuFreqProbe.cpp',
     KITS / 'BacklightProbe.cpp',
+    KITS / 'DisplayTimingProbe.cpp',
     KITS / 'AppleARMBacklight.cpp',
     KITS / 'GeniI2c.c',
     KITS / 'GeniI2c.h',

@@ -523,11 +523,13 @@ extern void sheng_cpufreq_poll(void);
 extern void native_touch_probe(void);
 extern void sheng_buttons_probe(void);
 extern void sheng_backlight_probe(void);
+extern void sheng_dpu_probe(void);
 extern void native_hid_input_probe(void);
 extern volatile uint32_t armcpu_smp_running, armcpu_gic_boot[8], armcpu_smp_step[8], armcpu_smp_fail[8];
 extern volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
 extern volatile int32_t native_buttons_stats[10], native_backlight_stats[16];
 extern volatile uint32_t native_touch_stage_done, native_touch_frames;
+extern volatile uint32_t native_ufs_dpu_state, native_legacy_direct[14];
 extern char native_cpufreq_row[120];
 // IOKit's busy services while the registry is not quiet: the network configuration names interfaces only once IOKit is quiet (or after its
 // 240 s limit), and the TimeSync clock manager waits for quiet too, so a service whose matching never ends holds up the network, TimeSync
@@ -609,9 +611,10 @@ void busyReport(void *, wait_result_t) {
                   armcpu_core_timer[4], armcpu_core_timer[5], armcpu_core_timer[6], armcpu_core_timer[7],
                   armcpu_core_sgi[0], armcpu_core_sgi[1], armcpu_core_sgi[2], armcpu_core_sgi[3],
                   armcpu_core_sgi[4], armcpu_core_sgi[5], armcpu_core_sgi[6], armcpu_core_sgi[7]);
-            IOLog("liuqin hw: btn=%d/%d/%d/%d bl=%d/%d/cfg=0x%x/err=%d tch=%u/%u cpu=%.80s\n",
+            IOLog("liuqin hw: btn=%d/%d/%d/%d bl=%d/%d/req=%d/wr=%d/err=%d dpu=0x%x/%u/%u tch=%u/%u cpu=%.64s\n",
                   native_buttons_stats[0], native_buttons_stats[4], native_buttons_stats[5], native_buttons_stats[8],
-                  native_backlight_stats[0], native_backlight_stats[3], (unsigned)native_backlight_stats[7], native_backlight_stats[9],
+                  native_backlight_stats[0], native_backlight_stats[3], native_backlight_stats[1], native_backlight_stats[2], native_backlight_stats[9],
+                  native_ufs_dpu_state, native_legacy_direct[0], native_legacy_direct[7],
                   native_touch_stage_done, native_touch_frames, native_cpufreq_row);
         }
         if (!busy && round > 4) break;
@@ -624,6 +627,7 @@ void native_legacy_display_late_probe(void) {
     {thread_t thread = nullptr; if (kernel_thread_start(busyReport, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);}
     native_keystore_probe();
     sheng_cpufreq_probe();
+    sheng_dpu_probe();
     native_touch_probe();
     sheng_buttons_probe();
     sheng_backlight_probe();

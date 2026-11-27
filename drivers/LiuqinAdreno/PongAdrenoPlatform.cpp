@@ -548,7 +548,7 @@ static void run(void *, wait_result_t)
     PongCpOps cp = {{nullptr, cp_write, cp_read, barrier, nullptr, nullptr}, smmu_io, record};
     const auto prepared = PongAdrenoCpPrepare(&cp);
     if (prepared) {
-        record("FAIL GPU ctx prep", prepared);
+        record("FAIL GPU ctx prep", unsigned(prepared));
         return;
     }
     native_liuqin_gpu_stats[0] = 6;
@@ -575,7 +575,7 @@ static void run(void *, wait_result_t)
     record("GMU freq/bw ok", 0, PongAdrenoPowerLevels[power_level].hz, PongAdrenoPowerLevels[power_level].bus);
     native_liuqin_gpu_stats[0] = 8;
     const auto cp_status = PongAdrenoCpStart(&gmu);
-    record("CP/Metal startup", cp_status, gr.core_version, gr.hfi_version);
+    record("CP/Metal startup", unsigned(cp_status), gr.core_version, gr.hfi_version);
     if (!cp_status) native_liuqin_gpu_stats[0] = 9;
 }
 

@@ -438,7 +438,7 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
         status = gpu->buffers[0].publishForDevice(0, sizes[0], false);
         __asm__ volatile("dsb sy" ::: "memory");
     }
-    note("GPU native4K/SQE prepared", status, slots[0], slots[1]);
+    note("GPU native4K/SQE prepared", unsigned(status), slots[0], slots[1]);
     gpu->prepared = !status;
     return status;
 }
@@ -467,11 +467,11 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
                     !wr64(GEN7_CP_SQE_INSTR_BASE_LO, iovas[0]) ||
                     !wr(GEN7_CP_SQE_CNTL, 1)))
         status = kIOReturnIOError;
-    NativeAdrenoCpInitConfig config = {iovas[0], iovas[3], 1, 0};
+    NativeAdrenoCpInitConfig config = {iovas[0], iovas[3], 1};
     uint32_t unused_fence = 0, fence = 0;
     if (!status) status = gpu->init.run(&gpu->ops.registers, &gpu->ring, &config, &unused_fence, false);
     const uint32_t init_wptr = gpu->ring.writePointer();
-    note("CP_ME_INIT submitted", status, init_wptr, (uint64_t(rd(GEN7_CP_RB_RPTR)) << 32) | rd(GEN7_CP_RB_WPTR));
+    note("CP_ME_INIT submitted", unsigned(status), init_wptr, (uint64_t(rd(GEN7_CP_RB_RPTR)) << 32) | rd(GEN7_CP_RB_WPTR));
     if (status || !wait_bootstrap(init_wptr, "CP_ME_INIT drained")) return kIOReturnIOError;
     if (!authorize()) return kIOReturnNotPermitted;
     uint32_t words[2] = {};
@@ -496,7 +496,7 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
     /* SM8475 GPU IRQ: GIC_SPI 300 (architectural INTID 332), level-high. */
     if (!status) status = armcpu_spi_attach(332, false, interrupt, nullptr, &route, &affinity);
     if (!status) status = gpu->irq.programMask(nullptr);
-    note("GPU IRQ 332", status, route, affinity);
+    note("GPU IRQ 332", unsigned(status), route, affinity);
     if (status) {
         wr(GEN7_RBBM_INT_0_MASK, 0);
         return status;

@@ -205,22 +205,20 @@ class ShengBacklight : public IOService {
     }
     void armTick() {
         bool busy = false;
-        uint64_t soonest = UINT64_MAX;
-        for (const Engine &e : engine) if (geni_i2c_busy(&e.bus)) {busy = true; if (e.deadline < soonest) soonest = e.deadline;}
+        for (const Engine &e : engine) if (geni_i2c_busy(&e.bus)) {busy = true; break;}
         if (!busy) {tick->cancelTimeout(); return;}
-        if (!irqMode) {tick->setTimeoutMS(kPollMs); return;}
-        tick->wakeAtTime((AbsoluteTime)soonest);
+        // Always poll every 1 ms while an I2C transfer is in flight (0.3 ms per write, 0% idle CPU):
+        // immune to GIC SPI routing/masking differences while still waking early on IRQ when delivered.
+        tick->setTimeoutMS(kPollMs);
     }
-    // The work loop's view of the engines: what the interrupts gathered, in polling mode the status register itself, then deadlines.
+    // The work loop's view of the engines: gather both IRQ-captured status and live M_IRQ_STATUS, then deadlines.
     void service() {
         for (unsigned i = 0; i < 2; ++i) {
             if (!engine[i].usable || !gSe[i].va) continue;
             uint32_t status = __atomic_exchange_n(&gIrqStatus[i], 0u, __ATOMIC_ACQUIRE);
-            if (!irqMode) {
-                const uint32_t direct = rd(gSe[i].va, GENI_M_IRQ_STATUS);
-                if (direct) wr(gSe[i].va, GENI_M_IRQ_CLEAR, direct);
-                status |= direct;
-            }
+            const uint32_t direct = rd(gSe[i].va, GENI_M_IRQ_STATUS);
+            if (direct) wr(gSe[i].va, GENI_M_IRQ_CLEAR, direct);
+            status |= direct;
             if (status) advance(i, status);
             Engine &e = engine[i];
             if (geni_i2c_busy(&e.bus) && now() >= e.deadline) {

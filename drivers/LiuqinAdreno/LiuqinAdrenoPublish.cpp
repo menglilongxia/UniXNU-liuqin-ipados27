@@ -13,21 +13,18 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *
     const NativeAdrenoRingClock *, const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *,
     uint32_t, uint32_t);
 extern "C" IOService *native_adreno_published_service(void);
-extern "C" void native_adreno_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp") __attribute__((weak));
-extern "C" IOService *native_adreno_accelerator_allocate(void) __attribute__((weak));
-extern "C" unsigned native_adreno_accelerator_instance_size(void) __attribute__((weak));
+extern "C" void native_adreno_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp");
+extern "C" IOService *native_adreno_accelerator_allocate(void);
+extern "C" unsigned native_adreno_accelerator_instance_size(void);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" volatile uint32_t native_liuqin_gpu_stats[8];
 
-/* Optional board hooks declared weak_import in NativeAdrenoPublish/Submit;
- * Darwin static kernel link requires a weak definition to satisfy ld. */
-extern "C" int boot_log_export_put(uint32_t, uint32_t, uint32_t, const void *, uint32_t) __attribute__((weak));
+/* Strong definitions for optional board hooks declared weak_import in
+ * NativeAdrenoPublish/Submit; avoids arm64e chained fixup imports in XnuPrelink. */
 extern "C" int boot_log_export_put(uint32_t, uint32_t, uint32_t, const void *, uint32_t) { return -1; }
-extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *, void (*)(void *), void *) __attribute__((weak));
 extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *, void (*)(void *), void *) { return KERN_NOT_SUPPORTED; }
-extern "C" volatile uint32_t native_gpu_dcvs[15] __attribute__((weak));
-volatile uint32_t native_gpu_dcvs[15];
+extern "C" { volatile uint32_t native_gpu_dcvs[15]; }
 
 namespace {
 PongCpBackend *gBackend = nullptr;
@@ -35,11 +32,6 @@ PongCpBackend *gBackend = nullptr;
 void publishMetalAccelerator()
 {
     native_liuqin_gpu_stats[5] = 1;
-    if (!native_adreno_accelerator_static_init || !native_adreno_accelerator_allocate ||
-        !native_adreno_accelerator_instance_size) {
-        native_liuqin_gpu_stats[6] = uint32_t(kIOReturnUnsupported);
-        return;
-    }
     const kern_return_t kext = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
     if (kext) {
         native_liuqin_gpu_stats[6] = uint32_t(kext);

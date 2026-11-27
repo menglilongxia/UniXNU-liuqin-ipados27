@@ -24,7 +24,7 @@ extern "C" const uint8_t PongAdrenoSqeFirmware[], PongAdrenoZapMdt[], PongAdreno
 extern "C" const size_t PongAdrenoSqeFirmwareBytes, PongAdrenoZapMdtBytes, PongAdrenoZapCodeBytes, PongAdrenoZapSignatureBytes;
 extern "C" volatile uint32_t native_adreno_wc_enabled;
 extern "C" uint64_t (*native_adreno_vm_now_us)(void);
-extern "C" void native_adreno_gpu_interrupt(uint32_t status) __attribute__((weak));
+extern "C" void native_adreno_gpu_interrupt(uint32_t status);
 extern "C" IOReturn armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 extern "C" int get_preemption_level(void);
 
@@ -169,7 +169,7 @@ static void interrupt(void *)
     const IOReturn status = gpu->irq.handle(&result);
     __atomic_fetch_add(&gpu->irq_count, 1, __ATOMIC_RELAXED);
     thread_wakeup(event_t(&gpu->irq_count));
-    if (native_adreno_gpu_interrupt && !status)
+    if (!status)
         native_adreno_gpu_interrupt(result.status);
     if (status || (result.flags & NativeAdrenoIrqFatal)) {
         __atomic_fetch_or(&gpu->irq_cp_status, result.cp_status, __ATOMIC_RELAXED);

@@ -48,6 +48,7 @@ archives = [
   "component:ShengUfs",
   "build-sheng-source-storage.py --policy-dir scripts/policies/ipados-27.0.1-24A446",
   "component:RamBlock",
+  "component:Adreno740",
   "fetch-liuqin-adreno-firmware.py",
   "build-liuqin-adreno-kits.py",
   "build-adreno740-accelerator.py",

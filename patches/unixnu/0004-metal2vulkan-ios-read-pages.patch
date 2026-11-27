@@ -1,0 +1,13 @@
+--- a/scripts/build-adreno-metal-bridge.py
++++ b/scripts/build-adreno-metal-bridge.py
+@@ -28,6 +28,10 @@
+ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
+     '0063-main-optimizations-on-development-46e7cc96.patch',
+     '0064-copies-leave-unreachable-pages-alone.patch']]
++if os.environ.get('UNIXNU_DEVICE'):
++    _ios_patch = Path(os.environ['UNIXNU_DEVICE']) / 'patches/metal2vulkan-ios-read-pages.patch'
++    if _ios_patch.is_file():
++        PATCHES.append(_ios_patch)
+ 
+ 
+ def git_tree(*steps):

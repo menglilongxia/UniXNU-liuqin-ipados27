@@ -1,0 +1,35 @@
+--- a/crates/metal2vulkan-runtime/src/copied.rs
++++ b/crates/metal2vulkan-runtime/src/copied.rs
+@@ -2640,6 +2640,32 @@
+     true
+ }
+ 
++/// [`read_pages`] on iOS/iPadOS.
++#[cfg(target_os = "ios")]
++pub(crate) fn read_pages(pages: NonNull<u8>, into: &mut [u8]) -> bool {
++    unsafe extern "C" {
++        static mach_task_self_: u32;
++        fn vm_read_overwrite(
++            target_task: u32,
++            address: usize,
++            size: usize,
++            data: usize,
++            outsize: *mut usize,
++        ) -> i32;
++    }
++    let mut read: usize = 0;
++    let answer = unsafe {
++        vm_read_overwrite(
++            mach_task_self_,
++            pages.as_ptr() as usize,
++            into.len(),
++            into.as_mut_ptr() as usize,
++            &mut read,
++        )
++    };
++    answer == 0 && read == into.len()
++}
++
+ /// [`read_pages`] on macOS.
+ #[cfg(target_os = "macos")]
+ pub(crate) fn read_pages(pages: NonNull<u8>, into: &mut [u8]) -> bool {

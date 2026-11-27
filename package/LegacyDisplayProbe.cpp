@@ -524,10 +524,16 @@ extern void native_touch_probe(void);
 extern void sheng_buttons_probe(void);
 extern void sheng_backlight_probe(void);
 extern void sheng_dpu_probe(void);
+extern void sheng_board_clock_probe(void);
+extern void sheng_usb_probe(void);
+extern void sheng_adsp_probe(void);
+extern void sheng_battery_probe(void);
 extern void native_hid_input_probe(void);
 extern volatile uint32_t armcpu_smp_running, armcpu_gic_boot[8], armcpu_smp_step[8], armcpu_smp_fail[8];
 extern volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
 extern volatile int32_t native_buttons_stats[10], native_backlight_stats[16];
+extern volatile int32_t native_adsp_stats[16], native_battery_stats[16];
+extern volatile uint32_t native_usb_stats[54], native_board_clock[16];
 extern volatile uint32_t native_touch_stage_done, native_touch_frames;
 extern volatile uint32_t native_ufs_dpu_state, native_legacy_direct[14];
 extern char native_cpufreq_row[120];
@@ -616,6 +622,11 @@ void busyReport(void *, wait_result_t) {
                   native_backlight_stats[0], native_backlight_stats[3], native_backlight_stats[1], native_backlight_stats[2], native_backlight_stats[9],
                   native_ufs_dpu_state, native_legacy_direct[0], native_legacy_direct[7],
                   native_touch_stage_done, native_touch_frames, native_cpufreq_row);
+            IOLog("liuqin io: usb=%d/id=0x%x/smmu=0x%x/rep=0x%x/pwr=%u adsp=%d/err=%d/fw=%d/ch=0x%x bat=%d/%d%%/mv=%d/ma=%d rtc=0x%x/%u\n",
+                  (int32_t)native_usb_stats[0], native_usb_stats[1], native_usb_stats[7], native_usb_stats[8], native_usb_stats[12],
+                  native_adsp_stats[0], native_adsp_stats[1], native_adsp_stats[7], native_adsp_stats[11],
+                  native_battery_stats[0], native_battery_stats[1], native_battery_stats[2], native_battery_stats[3],
+                  native_board_clock[0], native_board_clock[7]);
         }
         if (!busy && round > 4) break;
     }
@@ -627,8 +638,12 @@ void native_legacy_display_late_probe(void) {
     {thread_t thread = nullptr; if (kernel_thread_start(busyReport, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);}
     native_keystore_probe();
     sheng_cpufreq_probe();
+    sheng_board_clock_probe();
     sheng_dpu_probe();
     native_touch_probe();
+    sheng_usb_probe();
+    sheng_adsp_probe();
+    sheng_battery_probe();
     sheng_buttons_probe();
     sheng_backlight_probe();
     native_hid_input_probe();

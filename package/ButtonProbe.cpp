@@ -12,6 +12,8 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
+#include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
 #if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
 #include <IOKit/IOService.h>
@@ -60,16 +62,19 @@ bool mapWindow(Window &w, uint64_t base, uint64_t size) {
 volatile uint32_t *apidReg(int apid, uint32_t reg) {return gChn.va + (BR_CHNL_APID_STRIDE * (uint32_t)apid + reg) / 4;}
 void fail(int step, int error) {native_buttons_stats[8] = error; native_buttons_stats[0] = -step;}
 
-// The APID that serves ppid with its interrupts owned by this EE, as the mainline driver chooses it; -1 when there is none.
-int findApid(uint32_t ppid) {
-    int found = -1;
+// The APID that serves ppid: prefer one with interrupts owned by this EE, falling back to any APID serving ppid
+// so the read-only observer channel (br_read8) still works for real-time status polling on SM8475.
+int findApid(uint32_t ppid, bool *ownedOut) {
+    int owned = -1, any = -1;
     for (uint32_t i = 0; i < gApids; ++i) {
         uint32_t map = gCore.va[(BR_APID_MAP + 4 * i) / 4];
         if (!map || ((map >> 8) & 0xfff) != ppid) continue;
+        any = (int)i;
         const bool irqOwner = (map >> 24) & 1;
-        if (irqOwner && (gCnfg.va[(BR_CNFG_OWNER + 4 * i) / 4] & 7u) == gArb.ee) found = (int)i;
+        if (irqOwner && (gCnfg.va[(BR_CNFG_OWNER + 4 * i) / 4] & 7u) == gArb.ee) owned = (int)i;
     }
-    return found;
+    if (ownedOut) *ownedOut = owned >= 0;
+    return owned >= 0 ? owned : any;
 }
 // Both edges of the given interrupt bits, latched state cleared, then enabled in the peripheral. A command that ends with an error is
 // retried with the whole sequence: the peripheral answers NACK while its power state settles (kbd2: the PON reads failed this way once
@@ -135,7 +140,7 @@ void buttonsIrq(void *) {
 uint32_t pressed() {
     uint8_t pon = 0, gpio = 0xff;
     uint32_t mask = 0;
-    if (!br_read8(gObs.va, &gArb, gPon, kRtSts, &pon)) {
+    if (gPon >= 0 && !br_read8(gObs.va, &gArb, gPon, kRtSts, &pon)) {
         if (pon & kPowerBit) mask |= kReportPower;
         if (pon & kResinBit) mask |= kReportVolumeDown;
     }
@@ -151,16 +156,33 @@ bool setup() {
     gArb.core = gCore.va; gArb.cnfg = gCnfg.va;
     const uint32_t version = gCore.va[0];
     gApids = gCore.va[BR_FEATURES / 4] & BR_FEATURES_APIDS_MASK;
-    if (version < BR_VERSION_V7_MIN || version >= BR_VERSION_V8_MIN || !gApids || gApids > 1024) {fail(2, (int)version); return false;}
+    if (version < BR_VERSION_V7_MIN || version >= BR_VERSION_V8_MIN || !gApids || gApids > 1024) {
+        fail(2, (int)version);
+        IOLog("liuqin buttons: unsupported spmi ver=0x%x apids=%u\n", version, gApids);
+        return false;
+    }
     if (!mapWindow(gObs, kObsrvr, ((uint64_t)BR_OBS_APID_STRIDE * gApids + 0xfff) & ~0xfffull) ||
         !mapWindow(gChn, kChnls, (uint64_t)BR_CHNL_APID_STRIDE * gApids)) {fail(3, -12); return false;}
     native_buttons_stats[0] = 1;
-    gPon = findApid(kPonPpid); gGpio = findApid(kGpioPpid);
+    bool ponOwned = false, gpioOwned = false;
+    gPon = findApid(kPonPpid, &ponOwned);
+    gGpio = findApid(kGpioPpid, &gpioOwned);
     native_buttons_stats[4] = gPon; native_buttons_stats[5] = gGpio;
-    if (gPon < 0) {fail(4, -2); return false;}
-    int rc = armPeripheral(gPon, kPowerBit | kResinBit);
-    if (!rc && gGpio >= 0) rc = armPeripheral(gGpio, kGpioBit);
-    if (rc) {fail(5, rc); return false;}   // stats[8]: (step << 2) | rc, the peripheral's first failing command
+    if (gPon < 0 && gGpio < 0) {
+        fail(4, -2);
+        IOLog("liuqin buttons: no PON/GPIO APID found (ver=0x%x apids=%u)\n", version, gApids);
+        return false;
+    }
+    int rc = 0;
+    if (gPon >= 0 && ponOwned) rc = armPeripheral(gPon, kPowerBit | kResinBit);
+    if (!rc && gGpio >= 0 && gpioOwned) rc = armPeripheral(gGpio, kGpioBit);
+    if (rc) {
+        // Keep running in observer polling mode instead of giving up when write/IRQ arming fails.
+        native_buttons_stats[8] = rc;
+        IOLog("liuqin buttons: armPeripheral rc=%d (pon=%d/%u gpio=%d/%u), using observer poll\n",
+              rc, gPon, ponOwned ? 1u : 0u, gGpio, gpioOwned ? 1u : 0u);
+        return true;
+    }
     // PDC pin 1: level high, enabled.
     const uint32_t pdcVersion = gPdc.va[kPdcVersion / 4];
     native_buttons_stats[7] = (int32_t)pdcVersion;
@@ -172,21 +194,26 @@ bool setup() {
     }
     __asm__ volatile("dsb sy" ::: "memory");
     native_buttons_stats[0] = 2;
-    if (!armcpu_spi_attach) {fail(6, -78); return false;}
-    // The probe runs before the interrupt controller driver has started (int-228: kIOReturnNotReady at 4 s), so wait for it, up to a minute.
-    for (unsigned tries = 0;; ++tries) {
-        rc = armcpu_spi_attach(32 + kSpi, false, buttonsIrq, nullptr, nullptr, nullptr);
-        if (rc != kIOReturnNotReady || tries == 240) break;
-        IOSleep(250);
+    if (armcpu_spi_attach && (ponOwned || gpioOwned)) {
+        for (unsigned tries = 0;; ++tries) {
+            rc = armcpu_spi_attach(32 + kSpi, false, buttonsIrq, nullptr, nullptr, nullptr);
+            if (rc != kIOReturnNotReady || tries == 240) break;
+            IOSleep(250);
+        }
+        if (!rc) native_buttons_stats[0] = 3;
+        else native_buttons_stats[8] = rc;
     }
-    if (rc) {fail(6, rc); return false;}
-    native_buttons_stats[0] = 3;
+    IOLog("liuqin buttons: ready st=%d ver=0x%x apids=%u pon=%d/%u gpio=%d/%u pdc=0x%x err=%d\n",
+          native_buttons_stats[0], version, gApids, gPon, ponOwned ? 1u : 0u,
+          gGpio, gpioOwned ? 1u : 0u, pdcVersion, native_buttons_stats[8]);
     return true;
 }
 
 void buttonsThread(void *, wait_result_t) {
     thread_set_thread_name(current_thread(), "buttons");
     if (!setup()) return;
+    uint64_t pollTicks = 0;
+    nanoseconds_to_absolutetime(50000000ull, &pollTicks);   // 50 ms hybrid poll fallback (instant wake on IRQ)
     uint32_t seen = gEvents, last = 0;
     for (;;) {
         uint32_t mask = pressed();
@@ -206,10 +233,14 @@ void buttonsThread(void *, wait_result_t) {
             void (*sink)(void *, uint32_t) = __atomic_load_n(&gSink, __ATOMIC_ACQUIRE);
             if (sink) {sink(gSinkContext, mask); native_buttons_stats[2] = native_buttons_stats[2] + 1;}
         }
-        assert_wait((event_t)&gEvents, THREAD_UNINT);
-        if (gEvents != seen) clear_wait(current_thread(), THREAD_AWAKENED);
-        else thread_block(THREAD_CONTINUE_NULL);
-        seen = gEvents;
+        if (native_buttons_stats[0] == 3) {
+            assert_wait_deadline((event_t)&gEvents, THREAD_UNINT, mach_absolute_time() + pollTicks);
+            if (gEvents != seen) clear_wait(current_thread(), THREAD_AWAKENED);
+            else thread_block(THREAD_CONTINUE_NULL);
+            seen = gEvents;
+        } else {
+            IOSleep(50);
+        }
     }
 }
 }  // namespace

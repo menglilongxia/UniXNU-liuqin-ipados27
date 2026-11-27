@@ -49,11 +49,15 @@ extern "C" volatile uint32_t native_legacy_swapstat[16] __attribute__((weak_impo
 namespace {
 // Xiaomi Pad 6 Pro (liuqin, SM8475): single Kinetic KTZ8866 at I2C 0x11 on i2c1@984000 (QUPv3 wrap0 SE1, GIC_SPI 602).
 constexpr uint64_t kGcc = 0x100000, kGccMapSize = 0x70000, kSeA = 0x984000;
+constexpr uint64_t kTlmm = 0x0f100000;
+constexpr uint32_t kI2c1SdaGpio = 4, kI2c1SclGpio = 5, kGpioStride = 0x1000;
 constexpr uint32_t kSpi[2] = {602, 0};
-constexpr uint32_t kGccVote = 0x62008;
+constexpr uint32_t kGccVote = 0x62008, kGccGpll0Vote = 0x62018;
 // gcc-sm8450.c: wrap0 core_2x 9, core 8, m_ahb 6, s_ahb 7, s1 11.
 constexpr uint32_t kVoteBits = (1u << 9) | (1u << 8) | (1u << 6) | (1u << 7) | (1u << 11);
 constexpr uint32_t kHalt[] = {0x3300c, 0x33000, 0x27004, 0x27008, 0x27140};
+// GENI_CLK_SEL (0x7c) = 0 (DFS level 0 = 19.2 MHz TCXO); i2c-qcom-geni.c 100 kHz table for 19.2 MHz: div=7, high=10, low=12, cycle=26.
+constexpr uint32_t kGeniClkSel = 0x7cu, kI2c100kClkCfg = (7u << 4) | 1u, kI2c100kScl = (10u << 20) | (12u << 10) | 26u;
 constexpr uint8_t kAddress = 0x11, kBrtLsb = 0x04, kBrtMsb = 0x05;
 // The range CoreBrightness works in. The top level stands for kMaxNits: the panel's luminance has not been measured, so these set the slider's
 // scale, not an absolute brightness. kMidNits is CoreBrightness's own default.
@@ -443,6 +447,9 @@ class ShengBacklight : public IOService {
         publish(level);
         registerService();
         native_backlight_stats[0] = impersonated ? 4 : 3;
+        IOLog("liuqin backlight: published st=%d lvl=%u read=%d cfg=0x%x err=%d\n",
+              native_backlight_stats[0], level, native_backlight_stats[3],
+              (unsigned)native_backlight_stats[7], native_backlight_stats[9]);
         // A lid closed before the service was up: the panel goes dark now, with the level read kept as the one shown.
         if (__atomic_load_n(&gLidClosed, __ATOMIC_ACQUIRE)) setLevel(level);
     }
@@ -548,20 +555,38 @@ extern "C" void sheng_backlight_lid(bool closed) {
 // Called by BacklightProbe.cpp once this file's classes are registered (its static initializer runs between preModLoad and postModLoad).
 // The service starts with the engines' level reads in flight and publishes itself when they are answered.
 extern "C" void sheng_backlight_start(void) {
+    Window tlmm = {};
     if (!mapWindow(gGcc, kGcc, kGccMapSize) || !mapWindow(gSe[0], kSeA, 0x4000)) {fail(1, -12); return;}
     native_backlight_stats[0] = 1;
+    wr(gGcc.va, kGccGpll0Vote, rd(gGcc.va, kGccGpll0Vote) | 1u);
     wr(gGcc.va, kGccVote, rd(gGcc.va, kGccVote) | kVoteBits);
     for (uint32_t halt : kHalt) {
         if (rd(gGcc.va, halt) & (1u << 1)) continue;
         unsigned us = 0;
         while ((rd(gGcc.va, halt) & (1u << 31)) && us < 200) {IODelay(1); ++us;}
-        if (us == 200) {fail(2, (int)halt); return;}
+        if (us == 200) {fail(2, (int)halt); IOLog("liuqin backlight: clock halt timeout 0x%x\n", halt); return;}
+    }
+    // Ensure TLMM GPIO 4/5 are muxed to qup1 (func 1, 2 mA, pull-up) for i2c1@984000.
+    if (mapWindow(tlmm, kTlmm + kI2c1SdaGpio * kGpioStride, 2 * kGpioStride)) {
+        const uint32_t pinCfg = (1u << 2) | (0u << 6) | 3u;
+        wr(tlmm.va, 0, pinCfg);
+        wr(tlmm.va, (kI2c1SclGpio - kI2c1SdaGpio) * kGpioStride, pinCfg);
+        tlmm.map->release();
+    }
+    // If ABL cleared GENI_CLK_CFG or GENI_SCL_COUNTERS after splash, program 100 kHz timing on 19.2 MHz TCXO (DFS level 0).
+    if (!(rd(gSe[0].va, GENI_CLK_CFG) & 1u) || !rd(gSe[0].va, GENI_SCL_COUNTERS)) {
+        wr(gSe[0].va, kGeniClkSel, 0);
+        wr(gSe[0].va, GENI_CLK_CFG, kI2c100kClkCfg);
+        wr(gSe[0].va, GENI_SCL_COUNTERS, kI2c100kScl);
     }
     const bool usable[2] = {true, false};
     ShengBacklight *backlight = OSTypeAlloc(ShengBacklight);
     if (!backlight || !backlight->init() || !backlight->attach(IOService::getPlatform()) || !backlight->startBacklight(usable)) {
         if (backlight) backlight->release();
-        fail(3, -19); return;
+        fail(3, -19);
+        IOLog("liuqin backlight: start failed cfg=0x%x scl=0x%x ifd=0x%x\n",
+              rd(gSe[0].va, GENI_FW_REVISION), rd(gSe[0].va, GENI_SCL_COUNTERS), rd(gSe[0].va, GENI_IF_DISABLE));
+        return;
     }
     backlight->release();
 }

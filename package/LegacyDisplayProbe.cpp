@@ -519,10 +519,16 @@ void native_legacy_display_probe(void) {
 void native_legacy_display_late_probe(void);
 extern void native_keystore_probe(void);
 extern void sheng_cpufreq_probe(void);
+extern void sheng_cpufreq_poll(void);
 extern void native_touch_probe(void);
 extern void sheng_buttons_probe(void);
 extern void sheng_backlight_probe(void);
 extern void native_hid_input_probe(void);
+extern volatile uint32_t armcpu_smp_running, armcpu_gic_boot[8], armcpu_smp_step[8], armcpu_smp_fail[8];
+extern volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
+extern volatile int32_t native_buttons_stats[10], native_backlight_stats[16];
+extern volatile uint32_t native_touch_stage_done, native_touch_frames;
+extern char native_cpufreq_row[120];
 // IOKit's busy services while the registry is not quiet: the network configuration names interfaces only once IOKit is quiet (or after its
 // 240 s limit), and the TimeSync clock manager waits for quiet too, so a service whose matching never ends holds up the network, TimeSync
 // and everything waiting on them (macOS run28: en0 named after 240 s, WindowServer waiting on clocksyncd). Every 10 s for 10 minutes, while
@@ -590,7 +596,25 @@ void busyReport(void *, wait_result_t) {
             threadsShown = true;
             reportConfigThreads();
         }
-        if (!busy && round > 3) break;
+        if (round == 2 || round == 4) {
+            sheng_cpufreq_poll();
+            IOLog("liuqin smp: run=%u typer=0x%x step=%u,%u,%u,%u,%u,%u,%u,%u fail=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                  armcpu_smp_running, armcpu_gic_boot[3],
+                  armcpu_smp_step[0], armcpu_smp_step[1], armcpu_smp_step[2], armcpu_smp_step[3],
+                  armcpu_smp_step[4], armcpu_smp_step[5], armcpu_smp_step[6], armcpu_smp_step[7],
+                  armcpu_smp_fail[0], armcpu_smp_fail[1], armcpu_smp_fail[2], armcpu_smp_fail[3],
+                  armcpu_smp_fail[4], armcpu_smp_fail[5], armcpu_smp_fail[6], armcpu_smp_fail[7]);
+            IOLog("liuqin irq: tmr=%u,%u,%u,%u,%u,%u,%u,%u sgi=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                  armcpu_core_timer[0], armcpu_core_timer[1], armcpu_core_timer[2], armcpu_core_timer[3],
+                  armcpu_core_timer[4], armcpu_core_timer[5], armcpu_core_timer[6], armcpu_core_timer[7],
+                  armcpu_core_sgi[0], armcpu_core_sgi[1], armcpu_core_sgi[2], armcpu_core_sgi[3],
+                  armcpu_core_sgi[4], armcpu_core_sgi[5], armcpu_core_sgi[6], armcpu_core_sgi[7]);
+            IOLog("liuqin hw: btn=%d/%d/%d/%d bl=%d/%d/cfg=0x%x/err=%d tch=%u/%u cpu=%.80s\n",
+                  native_buttons_stats[0], native_buttons_stats[4], native_buttons_stats[5], native_buttons_stats[8],
+                  native_backlight_stats[0], native_backlight_stats[3], (unsigned)native_backlight_stats[7], native_backlight_stats[9],
+                  native_touch_stage_done, native_touch_frames, native_cpufreq_row);
+        }
+        if (!busy && round > 4) break;
     }
     thread_terminate(current_thread());
 }

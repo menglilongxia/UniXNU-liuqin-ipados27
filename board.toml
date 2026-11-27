@@ -152,6 +152,9 @@ kernel_args = [
   "backlight=1",
   "cpufreq=4",
   "smp=1",
+  "no-lc=1",
+  "vsync=120",
+  "vsync-fixed=1",
   "armcpu-idle-latency-us=100000",
   "data-persist=2",
   "sheng-data-persist=2",
@@ -163,8 +166,8 @@ kernel_args = [
 [payload.adt]
 # Matches Apple iPad17,3 (0x8142) from profiles/os/ipados-27.0.1-24A446/profile.toml.
 chip_id = "8142"
-# 2 GiB owned bootstrap window inside the high DRAM bank (>= 0x840000000), matching SM8450/cupid.
-owned_memory_size = "0x80000000"
+# 4.25 GiB owned bootstrap window inside verified DRAM High Main (0x840000000 + 0x12E000000 = 4.71 GiB).
+owned_memory_size = "0x110000000"
 packed_data_ramdisk = true
 persistent_data = true
 unique_chip_id = "required"
@@ -180,7 +183,7 @@ thin-bezel = 1
 sleep-disabled = 1
 # Qualcomm Gunyah runs at EL2; no Apple PMGR or SEP present.
 vmm-present = 1
-"kern.maxvnodes" = 66560
+"kern.maxvnodes" = 78848
 
 [adt.chosen.u32]
 # SM8475 has no Apple CTRR hardware.

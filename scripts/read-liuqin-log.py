@@ -21,6 +21,8 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 BLOCK = 4096
@@ -172,20 +174,54 @@ def pull_via_serial(port: str, reboot_fastboot: bool) -> bytes:
     return blob
 
 
+def pull_via_http(base_url: str, wait_s: int, reboot_fastboot: bool) -> bytes:
+    base = base_url.rstrip('/')
+    deadline = time.time() + wait_s
+    status_txt = None
+    print(f'Waiting for liuqin-linux-log reader at {base} (up to {wait_s}s)...')
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f'{base}/status.txt', timeout=2) as r:
+                status_txt = r.read().decode('utf-8', 'replace')
+                if 'READY=1' in status_txt:
+                    break
+        except (urllib.error.URLError, TimeoutError, OSError):
+            time.sleep(1)
+    if not status_txt or 'READY=1' not in status_txt:
+        raise SystemExit(f'Timed out waiting for {base}/status.txt (last: {status_txt!r})')
+    print(status_txt.strip())
+    with urllib.request.urlopen(f'{base}/log.bin', timeout=30) as r:
+        blob = r.read()
+    if len(blob) != LOG_BLOCKS * BLOCK:
+        raise SystemExit(f'Short HTTP read: {len(blob)} bytes (expected {LOG_BLOCKS * BLOCK})')
+    if reboot_fastboot:
+        try:
+            with urllib.request.urlopen(f'{base}/cgi-bin/reboot', timeout=3) as r:
+                print('Reboot trigger:', r.read().decode('utf-8', 'replace').strip())
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+    return blob
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument('--decode', type=Path, help='Decode an already-saved 32 MiB log.bin file')
+    src.add_argument('--http', nargs='?', const='http://192.168.7.2:8080',
+                     help='Pull /log.bin via USB NCM HTTP from liuqin-linux-log.img (default http://192.168.7.2:8080)')
     src.add_argument('--adb', action='store_true', help='Pull last 32 MiB of userdata read-only via adb (TWRP/root)')
     src.add_argument('--port', help='Pull /run/log.bin over USB CDC-ACM serial port (e.g. COM7)')
+    ap.add_argument('--wait', type=int, default=45, help='Seconds to wait for reader in --http mode')
     ap.add_argument('--adb-bin', default=shutil.which('adb') or 'adb', help='Path to adb executable')
     ap.add_argument('--serial', help='Optional ADB device serial')
-    ap.add_argument('--no-reboot', action='store_true', help='In --port mode, skip /bin/rebootbl after pulling')
+    ap.add_argument('--no-reboot', action='store_true', help='Skip rebooting back to fastboot after pulling')
     ap.add_argument('--out', type=Path, default=Path('out/logs'), help='Output directory for decoded runs')
     args = ap.parse_args()
 
     if args.decode:
         blob = args.decode.read_bytes()
+    elif args.http:
+        blob = pull_via_http(args.http, args.wait, not args.no_reboot)
     elif args.adb:
         blob = pull_via_adb(args.adb_bin, args.serial)
     else:

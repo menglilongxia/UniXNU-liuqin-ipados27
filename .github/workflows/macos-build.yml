@@ -115,8 +115,19 @@ jobs:
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Install Rust 1.98.0 + rust-src (for AdrenoMetal bridge)
+      - name: Restore cached Turnip/Metal/AppSync runtime
+        id: runtime-cache
         if: ${{ inputs.steps == 'full' || inputs.steps == '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            UniXNU/build/liuqin-runtime-cache/gpuaddon.bin
+            UniXNU/build/liuqin-runtime-cache/owner-trust.bundle
+            UniXNU/build/liuqin-runtime-cache/appsync-signer
+          key: liuqin-runtime-v1-24A446-${{ hashFiles('device/patches/metal2vulkan*.patch', 'device/patches/unixnu/0004-*.patch') }}
+
+      - name: Install Rust 1.98.0 + rust-src (for AdrenoMetal bridge)
+        if: ${{ (inputs.steps == 'full' || inputs.steps == '') && steps.runtime-cache.outputs.cache-hit != 'true' }}
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
@@ -235,9 +246,47 @@ jobs:
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
         run: |
+          EXTRA_ARGS=()
+          CACHE_DIR="build/liuqin-runtime-cache"
+          TREE_DIR="out/liuqin/ipados-27.0.1-24A446/liuqin_ipados27/tree"
+          if [ -f "$CACHE_DIR/gpuaddon.bin" ] && [ -f "$CACHE_DIR/owner-trust.bundle" ]; then
+            echo "CACHE HIT: reusing prebuilt Turnip/Metal gpuaddon.bin & owner-trust.bundle (skipping 35 min Rust/Mesa compile)"
+            if [ -d "$CACHE_DIR/appsync-signer" ]; then
+              mkdir -p "$TREE_DIR/.cache"
+              rm -rf "$TREE_DIR/.cache/appsync-signer"
+              cp -R "$CACHE_DIR/appsync-signer" "$TREE_DIR/.cache/appsync-signer"
+            fi
+            EXTRA_ARGS+=(--gpu-addon "$CACHE_DIR/gpuaddon.bin" --owner-trust-cache "$CACHE_DIR/owner-trust.bundle")
+          fi
           ./unixnu build payload -D ../device --uefi ../uefi-sheng \
             --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID:-0x84750A0B0C0D0001}" \
-            --data-ramdisk build/liuqin-data.dbr
+            --data-ramdisk build/liuqin-data.dbr \
+            "${EXTRA_ARGS[@]}"
+          if [ "${{ steps.runtime-cache.outputs.cache-hit }}" != "true" ]; then
+            RT_DIR="out/liuqin/ipados-27.0.1-24A446/liuqin_ipados27/runtime"
+            mkdir -p "$CACHE_DIR"
+            cp "$RT_DIR/gpuaddon.bin" "$CACHE_DIR/gpuaddon.bin"
+            if [ -f "$RT_DIR/appsync-owner-trust.bundle" ]; then
+              cp "$RT_DIR/appsync-owner-trust.bundle" "$CACHE_DIR/owner-trust.bundle"
+            else
+              cp "$RT_DIR/owner-trust.bundle" "$CACHE_DIR/owner-trust.bundle"
+            fi
+            if [ -d "$TREE_DIR/.cache/appsync-signer" ]; then
+              rm -rf "$CACHE_DIR/appsync-signer"
+              cp -R "$TREE_DIR/.cache/appsync-signer" "$CACHE_DIR/appsync-signer"
+            fi
+            ls -lh "$CACHE_DIR"
+          fi
+
+      - name: Save Turnip/Metal/AppSync runtime cache
+        if: ${{ (inputs.steps == 'full' || inputs.steps == '') && steps.runtime-cache.outputs.cache-hit != 'true' && steps.payload.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            UniXNU/build/liuqin-runtime-cache/gpuaddon.bin
+            UniXNU/build/liuqin-runtime-cache/owner-trust.bundle
+            UniXNU/build/liuqin-runtime-cache/appsync-signer
+          key: liuqin-runtime-v1-24A446-${{ hashFiles('device/patches/metal2vulkan*.patch', 'device/patches/unixnu/0004-*.patch') }}
 
       - name: Build boot.img
         id: bootimg

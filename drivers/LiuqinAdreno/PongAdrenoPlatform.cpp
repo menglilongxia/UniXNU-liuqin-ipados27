@@ -24,6 +24,7 @@ extern "C" const size_t PongAdrenoGmuFirmwareBytes;
 extern "C" {
 volatile uint32_t native_liuqin_gpu_stats[8];
 char native_liuqin_gpu_phase[64];
+char native_liuqin_gpu_log[2048];
 }
 
 namespace {
@@ -55,6 +56,8 @@ static ArmSmmu4KIo smmu_io;
 static uint64_t bank_offset;
 static unsigned parents_ready, attempted;
 
+static size_t gpu_log_len;
+
 static void record(const char *phase, unsigned result, uint64_t a = 0, uint64_t b = 0)
 {
     native_liuqin_gpu_stats[1] = result;
@@ -63,6 +66,17 @@ static void record(const char *phase, unsigned result, uint64_t a = 0, uint64_t 
         if (n >= sizeof(native_liuqin_gpu_phase)) n = sizeof(native_liuqin_gpu_phase) - 1;
         memcpy(native_liuqin_gpu_phase, phase, n);
         native_liuqin_gpu_phase[n] = '\0';
+    }
+    if (gpu_log_len + 1 < sizeof(native_liuqin_gpu_log)) {
+        const size_t avail = sizeof(native_liuqin_gpu_log) - gpu_log_len;
+        const int wrote = snprintf(native_liuqin_gpu_log + gpu_log_len, avail,
+                                   "  %s=%u a=0x%llx b=0x%llx\n",
+                                   phase ? phase : "?", result,
+                                   (unsigned long long)a, (unsigned long long)b);
+        if (wrote > 0) {
+            gpu_log_len += (size_t(wrote) < avail) ? size_t(wrote) : (avail - 1);
+            native_liuqin_gpu_log[gpu_log_len] = '\0';
+        }
     }
     IOLog("LIUQIN ADRENO: %s result=%u a=0x%llx b=0x%llx\n",
           phase ? phase : "?", result, (unsigned long long)a, (unsigned long long)b);
@@ -281,10 +295,19 @@ static int clock_write(void *, PongClockWindow w, size_t at, uint32_t v)
 
 static int clock_prerequisite(void *)
 {
-    const uint64_t rate = 19200000ULL * ((rd(gcc, 0x10) & 0xffff) * 65536ULL + (rd(gcc, 0x14) & 0xffff)) / 65536ULL;
+    /* SM8475 GCC GPLL0 (LUCID_EVO) is HW-FSM voted via APCS vote 0x62018 bit 0:
+     * check PLL_LOCK_DET (bit 31) and 600 MHz L/ALPHA rate, NOT SW OUTCTRL/OPMODE. */
+    if (!(rd(gcc, 0) & 0x80000000u)) {
+        wr(gcc, 0x62018, rd(gcc, 0x62018) | 1u);
+        (void)poll(gcc, 0, 0x80000000u, 0x80000000u, 200);
+    }
     const uint32_t mode = rd(gcc, 0), opmode = rd(gcc, 4);
-    const bool locked = (mode & 0x80000000u) && (mode & 1u) && (opmode & 1u);
-    return (!parents_ready || !locked || rate != 600000000ULL) ? 1 : 0;
+    const uint64_t rate = 19200000ULL * ((rd(gcc, 0x10) & 0xffff) * 65536ULL + (rd(gcc, 0x14) & 0xffff)) / 65536ULL;
+    if (!parents_ready || !(mode & 0x80000000u) || rate != 600000000ULL) {
+        record("GPLL0 prereq fail", parents_ready, (uint64_t(mode) << 32) | opmode, rate);
+        return 1;
+    }
+    return 0;
 }
 
 static int smmu_read(void *, size_t at, uint32_t *v)
@@ -328,18 +351,27 @@ static bool start_smmu()
 {
     const Mapping &m = windows[PongGpuSmmu];
     const uint32_t id0 = rd(m, 0x20), id1 = rd(m, 0x24), id2 = rd(m, 0x28);
-    const unsigned groups = (id0 & 255) > PongAdrenoStreamSlots ? PongAdrenoStreamSlots : (id0 & 255);
-    const unsigned banks = id1 & 255;
+    const uint32_t gfsr = rd(m, 0x48);
+    record("GPU SMMU actual IDs", gfsr, (uint64_t(id0) << 32) | id1, id2);
+    const unsigned hw_groups = id0 & 255, hw_banks = id1 & 255;
+    if ((id1 >> 31) || hw_groups < 2 || hw_banks < 2 || gfsr) {
+        record("FAIL SMMU IDs/GFSR", 1, gfsr, (uint64_t(hw_groups) << 32) | hw_banks);
+        return false;
+    }
+    const unsigned groups = hw_groups > PongAdrenoStreamSlots ? PongAdrenoStreamSlots : hw_groups;
+    const unsigned banks = hw_banks > PongAdrenoContextBanks ? PongAdrenoContextBanks : hw_banks;
     const unsigned pages = 1u << (((id1 >> 28) & 7) + 1);
     const bool ex = (id0 >> 8) & 1;
-    if ((id1 >> 31) || groups < 2 || banks < 2) return false;
     for (unsigned i = 0; i < groups; i++) {
         const uint32_t smr = rd(m, 0x800 + 4 * i), sc = rd(m, 0xc00 + 4 * i);
         if (!(ex ? !!(sc & 1024) : !!(smr & 0x80000000)) || (sc & 0x30000)) continue;
         const uint32_t mask = (smr >> 16) & (ex ? 65535 : 32767), sid = smr & 65535;
         if ((mask == 0 || mask == 0x400) && ((sid & ~0x400u) == 0 || (sid & ~0x400u) == 5)) continue;
         const unsigned b = sc & 255;
-        if (b >= banks) return false;
+        if (b >= hw_banks) {
+            record("FAIL SMMU foreign bank", 1, b, sid);
+            return false;
+        }
         const size_t at = (pages + b) * 4096;
         if (!(rd(m, at) & 1)) continue;
         const uint64_t lower = *reinterpret_cast<volatile uint64_t *>(m.cpu + at + 0x20);
@@ -428,6 +460,13 @@ static bool start_smmu()
     const auto status = PongAdrenoSmmuStart(&smmu_io, 0x03da0000, PongAdrenoSmmuGmu, bank, slots,
                                             &config, &audit, 4096, &context, &result);
     record("GMU native4K context", status, bank, result.phase);
+    if (status == ArmSmmu4KStateMismatch) {
+        const auto &v = result.context.readback;
+        record("GMU mismatch CBAR/CBA2R", status, v.cbar, v.cba2r);
+        record("GMU mismatch TCR/TCR2", status, v.tcr, v.tcr2);
+        record("GMU mismatch SCTLR/MAIR", status, v.sctlr, (uint64_t(v.mair1) << 32) | v.mair0);
+        record("GMU mismatch roots", status, v.ttbr0, v.ttbr1);
+    }
     return status == ArmSmmu4KSuccess;
 }
 

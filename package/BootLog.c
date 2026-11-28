@@ -44,6 +44,7 @@ struct boot_log_metal_diag {uint32_t opens, busy, bad, closes, reports, property
 extern struct boot_log_metal_diag native_adreno_metal_diag __attribute__((weak_import));
 extern volatile uint32_t native_liuqin_gpu_stats[8] __attribute__((weak_import));
 extern char native_liuqin_gpu_phase[64] __attribute__((weak_import));
+extern char native_liuqin_gpu_log[2048] __attribute__((weak_import));
 extern uint32_t native_adreno_publish_stats(uint32_t *) __attribute__((weak_import));
 extern volatile uint32_t native_adreno_mount_fail[4] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_cp_aperture[4] __attribute__((weak_import));
@@ -330,6 +331,11 @@ static size_t compose_slot(char *out, size_t cap, uint32_t slot, unsigned now, c
     if (&native_iokit_busy_text && native_iokit_busy_text[0][0]) {
         snprintf(row, sizeof row, "[iokit] %.190s", native_iokit_busy_text[0]);
         at = put_line(out, at, cap, row);
+    }
+
+    if (&native_liuqin_gpu_log && native_liuqin_gpu_log[0]) {
+        at = put_line(out, at, cap, "[gpu log]");
+        at = put_line(out, at, cap, native_liuqin_gpu_log);
     }
     return at;
 }

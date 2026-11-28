@@ -98,7 +98,8 @@ struct boot_log_header {
     uint32_t diag_first, diag_bytes;
     uint32_t msg_mode, msg_resyncs, msg_head_lo, msg_head_hi;
 };
-_Static_assert(sizeof(struct boot_log_header) == 164, "SHLOG001 v5 header layout mismatch");
+_Static_assert(__builtin_offsetof(struct boot_log_header, msg_head_hi) == 160, "SHLOG001 v5 msg_head_hi offset mismatch");
+_Static_assert(sizeof(struct boot_log_header) == 168, "SHLOG001 v5 header size mismatch");
 
 /* Writer state observed by SourceStorage.cpp boot_log_check:
  * 0 off, 1 waiting, 2 writing, 3 stopped after errors, 4 stopped (GPT changed), 5 panic flushed. */

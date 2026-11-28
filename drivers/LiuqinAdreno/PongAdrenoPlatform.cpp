@@ -424,7 +424,7 @@ static bool start_smmu()
         return false;
     wr(m, bank_offset + 4, 0x32b);
     if (rd(m, bank_offset + 4) != 0x32b) return false;
-    const uint32_t scr = (rd(m, 0) & ~13u) | 0x402u | (ex ? 8u : 0u);
+    const uint32_t scr = (rd(m, 0) & ~9u) | 0x406u | (ex ? 8u : 0u);
     wr(m, 0, scr);
     for (unsigned i = 0; i < 2; i++) {
         wr(m, 0xc00 + 4 * slots[i], 0x20000);
@@ -460,6 +460,9 @@ static bool start_smmu()
     const auto status = PongAdrenoSmmuStart(&smmu_io, 0x03da0000, PongAdrenoSmmuGmu, bank, slots,
                                             &config, &audit, 4096, &context, &result);
     record("GMU native4K context", status, bank, result.phase);
+    if (status != ArmSmmu4KSuccess) {
+        record("GMU stream state", status, result.streams.scr0, result.streams.global_fault);
+    }
     if (status == ArmSmmu4KStateMismatch) {
         const auto &v = result.context.readback;
         record("GMU mismatch CBAR/CBA2R", status, v.cbar, v.cba2r);

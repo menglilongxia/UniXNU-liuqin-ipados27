@@ -316,14 +316,19 @@ static bool authorize()
 {
     /* On liuqin, XNU's owned RAM starts at 0x840000000; 0x8b91a000/0x2000 is
      * Qualcomm's reserved gpu_micro_code_mem outside XNU's DRAM window. */
-    if (gpu->metadata.allocate(4096, gpu->output_bits, true, 4096) || gpu->metadata.makeWriteCombined())
+    if (gpu->metadata.allocate(4096, gpu->output_bits, true, 4096) || gpu->metadata.makeWriteCombined()) {
+        note("ZAP meta alloc fail", 1, gpu->output_bits);
         return false;
+    }
     OSSharedPtr<IOMemoryDescriptor> memory(
         IOMemoryDescriptor::withPhysicalAddress(PongZapReservedPhysical, PongZapReservedBytes, kIODirectionInOut),
         OSNoRetain);
     if (memory)
         gpu->zap_map = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain);
-    if (!gpu->zap_map) return false;
+    if (!gpu->zap_map) {
+        note("ZAP reserved map fail", 1, PongZapReservedPhysical, PongZapReservedBytes);
+        return false;
+    }
     PongZapConfig c = {
         PongAdrenoZapMdt, PongAdrenoZapMdtBytes,
         PongAdrenoZapSignature, PongAdrenoZapSignatureBytes, 2,
